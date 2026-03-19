@@ -123,9 +123,12 @@ func (r *MinifyRenamer) AllocateSlots() {
 		}
 	}
 
-	// Sort by count descending (most used first)
+	// Sort by count descending (most used first), then by index ascending for stability
 	sort.Slice(renameable, func(i, j int) bool {
-		return renameable[i].count > renameable[j].count
+		if renameable[i].count != renameable[j].count {
+			return renameable[i].count > renameable[j].count
+		}
+		return renameable[i].ref.InnerIndex < renameable[j].ref.InnerIndex
 	})
 
 	// Allocate slots
