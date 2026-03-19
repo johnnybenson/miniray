@@ -26,3 +26,8 @@ Thumbs.db
 vendor/
 go.sum
 testdata/tint/
+
+# Zig
+zig/.zig-cache/
+zig/zig-out/
+zig/Diagnostic.o

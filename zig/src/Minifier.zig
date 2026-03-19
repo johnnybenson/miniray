@@ -1,0 +1,312 @@
+//! WGSL minification pipeline.
+//!
+//! Orchestrates: Parse → Mark API-facing → DCE → Compute usage → Rename → Print.
+
+const std = @import("std");
+const Ast = @import("Ast.zig");
+const Lexer = @import("Lexer.zig");
+const Parser = @import("Parser.zig");
+const Printer = @import("Printer.zig");
+const RenamerMod = @import("Renamer.zig");
+const Dce = @import("Dce.zig");
+const SourceMap = @import("SourceMap.zig");
+
+const Minifier = @This();
+
+pub const SourceMapOptions = struct {
+    file: []const u8 = "",
+    source_name: []const u8 = "",
+    include_source: bool = false,
+};
+
+pub const Options = struct {
+    minify_whitespace: bool = true,
+    minify_identifiers: bool = true,
+    minify_syntax: bool = true,
+    mangle_external_bindings: bool = false,
+    tree_shaking: bool = true,
+    preserve_uniform_struct_types: bool = false,
+    keep_names: []const []const u8 = &.{},
+    generate_source_map: bool = false,
+    source_map_options: SourceMapOptions = .{},
+};
+
+pub const Result = struct {
+    code: []const u8,
+    errors: []const Parser.ParseError,
+    original_size: usize,
+    minified_size: usize,
+    symbols_total: usize,
+    symbols_dead: u32,
+    source_map: ?SourceMap.Result = null,
+};
+
+pub fn defaultOptions() Options {
+    return .{};
+}
+
+/// Minify WGSL source code. Returns the minified code and statistics.
+/// The returned code is owned by the arena allocator.
+pub fn minify(allocator: std.mem.Allocator, source: [:0]const u8, options: Options) !Result {
+    var result = Result{
+        .code = "",
+        .errors = &.{},
+        .original_size = source.len,
+        .minified_size = 0,
+        .symbols_total = 0,
+        .symbols_dead = 0,
+    };
+
+    // 1. Tokenize
+    var tokens = try Lexer.tokenize(allocator, source);
+    defer tokens.deinit(allocator);
+
+    // 2. Parse
+    var parser = Parser.init(allocator, source, tokens);
+    const module = parser.parse() catch {
+        result.code = source;
+        result.minified_size = source.len;
+        result.errors = parser.errors.items;
+        return result;
+    };
+
+    if (parser.errors.items.len > 0) {
+        result.code = source;
+        result.minified_size = source.len;
+        result.errors = parser.errors.items;
+        return result;
+    }
+
+    // 3. Mark API-facing symbols
+    markAPIFacingSymbols(module, options);
+
+    // 4. DCE
+    if (options.tree_shaking) {
+        result.symbols_dead = Dce.mark(allocator, module);
+    } else {
+        for (module.symbols.items) |*sym| {
+            sym.flags.is_live = true;
+        }
+    }
+
+    // 5. Compute usage
+    var uses = computeSymbolUsage(allocator, module);
+    defer uses.deinit(allocator);
+
+    // 6. Build reserved names
+    var reserved = RenamerMod.computeReservedNames(allocator);
+    for (options.keep_names) |name| {
+        reserved.put(allocator, name, {}) catch {};
+    }
+
+    // 7. Set up source map generator if requested
+    var source_map_gen: ?*SourceMap.Generator = null;
+    if (options.generate_source_map) {
+        const gen = try allocator.create(SourceMap.Generator);
+        gen.* = SourceMap.Generator.init(allocator, source);
+        gen.setFile(options.source_map_options.file);
+        gen.setSourceName(options.source_map_options.source_name);
+        gen.setIncludeSource(options.source_map_options.include_source);
+        source_map_gen = gen;
+    }
+
+    // 8. Create renamer and print
+    if (options.minify_identifiers) {
+        const min_renamer = try allocator.create(RenamerMod.MinifyRenamer);
+        min_renamer.* = RenamerMod.MinifyRenamer.init(allocator, module.symbols.items, reserved);
+        min_renamer.accumulateSymbolUseCounts(&uses);
+        min_renamer.allocateSlots();
+        min_renamer.reserveUnrenamedSymbolNames();
+        min_renamer.assignNames();
+        // Fix self-referential pointer after heap allocation
+        min_renamer.renamer.ptr = @ptrCast(min_renamer);
+
+        var printer = Printer.init(allocator, .{
+            .minify_whitespace = options.minify_whitespace,
+            .minify_identifiers = options.minify_identifiers,
+            .minify_syntax = options.minify_syntax,
+            .tree_shaking = options.tree_shaking,
+            .renamer = &min_renamer.renamer,
+            .source_map_gen = source_map_gen,
+        }, module.symbols.items);
+
+        result.code = try printer.print(module);
+    } else {
+        const noop = try allocator.create(RenamerMod.NoOpRenamer);
+        noop.* = RenamerMod.NoOpRenamer.init(module.symbols.items);
+        // Fix self-referential pointer after heap allocation
+        noop.renamer.ptr = @ptrCast(noop);
+
+        var printer = Printer.init(allocator, .{
+            .minify_whitespace = options.minify_whitespace,
+            .minify_identifiers = false,
+            .minify_syntax = options.minify_syntax,
+            .tree_shaking = options.tree_shaking,
+            .renamer = &noop.renamer,
+            .source_map_gen = source_map_gen,
+        }, module.symbols.items);
+
+        result.code = try printer.print(module);
+    }
+
+    // 9. Finalize source map
+    if (source_map_gen) |gen| {
+        result.source_map = gen.generate();
+    }
+
+    result.minified_size = result.code.len;
+    result.symbols_total = module.symbols.items.len;
+    return result;
+}
+
+fn markAPIFacingSymbols(module: *Ast.Module, options: Options) void {
+    // Build keep names set
+    var keep_set: std.StringHashMapUnmanaged(void) = .empty;
+    // We don't have the allocator here easily, but we can just check inline
+    _ = &keep_set;
+
+    for (module.symbols.items) |*sym| {
+        if (sym.flags.is_entry_point) sym.flags.must_not_be_renamed = true;
+        if (sym.kind == .builtin) sym.flags.must_not_be_renamed = true;
+        if (sym.kind == .override) sym.flags.must_not_be_renamed = true;
+        if (sym.flags.is_external_binding and !options.mangle_external_bindings) {
+            sym.flags.must_not_be_renamed = true;
+        }
+        // Check keep_names
+        for (options.keep_names) |name| {
+            if (std.mem.eql(u8, sym.original_name, name)) {
+                sym.flags.must_not_be_renamed = true;
+                break;
+            }
+        }
+    }
+
+    // Preserve uniform struct types
+    if (options.preserve_uniform_struct_types) {
+        for (module.declarations.items) |decl| {
+            if (decl != .@"var") continue;
+            const var_decl = decl.@"var";
+            if (!var_decl.name.isValid()) continue;
+            const sym = &module.symbols.items[var_decl.name.index()];
+            if (!sym.flags.is_external_binding) continue;
+            if (var_decl.typ) |typ| {
+                if (typ == .ident) {
+                    const ident_type = typ.ident;
+                    if (ident_type.ref.isValid() and ident_type.ref.index() < module.symbols.items.len) {
+                        module.symbols.items[ident_type.ref.index()].flags.must_not_be_renamed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn computeSymbolUsage(allocator: std.mem.Allocator, module: *const Ast.Module) std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32) {
+    var uses: std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32) = .empty;
+    for (module.declarations.items) |decl| {
+        countDeclUsage(allocator, decl, &uses);
+    }
+    return uses;
+}
+
+fn countDeclUsage(allocator: std.mem.Allocator, decl: Ast.Decl, uses: *std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32)) void {
+    switch (decl) {
+        .@"const" => |d| {
+            if (d.initializer) |init_expr| countExprUsage(allocator, init_expr, uses);
+        },
+        .override => |d| {
+            if (d.initializer) |init_expr| countExprUsage(allocator, init_expr, uses);
+        },
+        .@"var" => |d| {
+            if (d.initializer) |init_expr| countExprUsage(allocator, init_expr, uses);
+        },
+        .let => |d| {
+            if (d.initializer) |init_expr| countExprUsage(allocator, init_expr, uses);
+        },
+        .function => |d| {
+            // Count function name itself
+            if (d.name.isValid()) {
+                const entry = uses.getOrPutValue(allocator, d.name, 0) catch return;
+                entry.value_ptr.* += 1;
+            }
+            if (d.body) |body| countStmtUsage(allocator, .{ .compound = body }, uses);
+        },
+        .@"struct", .alias, .const_assert => {},
+    }
+}
+
+fn countExprUsage(allocator: std.mem.Allocator, expr: Ast.Expr, uses: *std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32)) void {
+    switch (expr) {
+        .ident => |e| {
+            if (e.ref.isValid()) {
+                const entry = uses.getOrPutValue(allocator, e.ref, 0) catch return;
+                entry.value_ptr.* += 1;
+            }
+        },
+        .binary => |e| {
+            countExprUsage(allocator, e.left, uses);
+            countExprUsage(allocator, e.right, uses);
+        },
+        .unary => |e| countExprUsage(allocator, e.operand, uses),
+        .call => |e| {
+            if (e.func) |f| countExprUsage(allocator, f, uses);
+            for (e.args.items) |arg| countExprUsage(allocator, arg, uses);
+        },
+        .index => |e| {
+            countExprUsage(allocator, e.base, uses);
+            countExprUsage(allocator, e.idx, uses);
+        },
+        .member => |e| countExprUsage(allocator, e.base, uses),
+        .paren => |e| countExprUsage(allocator, e.expr, uses),
+        .literal => {},
+    }
+}
+
+fn countStmtUsage(allocator: std.mem.Allocator, stmt: Ast.Stmt, uses: *std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32)) void {
+    switch (stmt) {
+        .compound => |s| {
+            for (s.stmts.items) |inner| countStmtUsage(allocator, inner, uses);
+        },
+        .@"return" => |s| {
+            if (s.value) |v| countExprUsage(allocator, v, uses);
+        },
+        .@"if" => |s| {
+            countExprUsage(allocator, s.condition, uses);
+            countStmtUsage(allocator, .{ .compound = s.body }, uses);
+            if (s.else_branch) |eb| countStmtUsage(allocator, eb, uses);
+        },
+        .@"switch" => |s| {
+            countExprUsage(allocator, s.expr, uses);
+            for (s.cases.items) |c| {
+                for (c.selectors.items) |sel| countExprUsage(allocator, sel, uses);
+                countStmtUsage(allocator, .{ .compound = c.body }, uses);
+            }
+        },
+        .@"for" => |s| {
+            if (s.init_stmt) |is| countStmtUsage(allocator, is, uses);
+            if (s.condition) |c| countExprUsage(allocator, c, uses);
+            if (s.update) |u| countStmtUsage(allocator, u, uses);
+            countStmtUsage(allocator, .{ .compound = s.body }, uses);
+        },
+        .@"while" => |s| {
+            countExprUsage(allocator, s.condition, uses);
+            countStmtUsage(allocator, .{ .compound = s.body }, uses);
+        },
+        .loop => |s| {
+            countStmtUsage(allocator, .{ .compound = s.body }, uses);
+            if (s.continuing) |c| countStmtUsage(allocator, .{ .compound = c }, uses);
+        },
+        .break_if => |s| countExprUsage(allocator, s.condition, uses),
+        .assign => |s| {
+            countExprUsage(allocator, s.left, uses);
+            countExprUsage(allocator, s.right, uses);
+        },
+        .incr_decr => |s| countExprUsage(allocator, s.expr, uses),
+        .call => |s| {
+            if (s.call.func) |f| countExprUsage(allocator, f, uses);
+            for (s.call.args.items) |arg| countExprUsage(allocator, arg, uses);
+        },
+        .decl => |s| countDeclUsage(allocator, s.decl, uses),
+        .@"break", .@"continue", .discard => {},
+    }
+}
