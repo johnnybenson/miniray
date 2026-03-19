@@ -178,3 +178,60 @@ await initialize({ wasmURL: '/miniray.wasm' });
 4. **wasm_exec.js**: Must match Go version. Copy from `$(go env GOROOT)/lib/wasm/wasm_exec.js` (Go 1.25+) or `$(go env GOROOT)/misc/wasm/wasm_exec.js` (older)
 
 5. **keepNames for struct fields**: Not needed - fields accessed via `.` operator, not as identifiers
+
+# Zig Port
+
+Complete Zig rewrite of the core pipeline in `zig/`. Produces **byte-identical output** to Go on all test shaders.
+
+## Quick Commands (Zig)
+
+```bash
+cd zig/
+
+# Build
+zig build              # Native CLI → zig-out/bin/miniray
+zig build wasm         # WASM → zig-out/bin/miniray.wasm (88 KB)
+
+# Test
+zig build test         # Run all 152 tests
+
+# Run
+./zig-out/bin/miniray shader.wgsl
+./zig-out/bin/miniray --config configs/compute.toys.json shader.wgsl
+echo 'fn main() {}' | ./zig-out/bin/miniray
+./zig-out/bin/miniray validate shader.wgsl
+```
+
+## Zig Module Map
+
+| Zig Module | Go Equivalent | Lines |
+|------------|---------------|-------|
+| `src/Lexer.zig` | `internal/lexer/` | 767 |
+| `src/Ast.zig` | `internal/ast/` | 688 |
+| `src/Parser.zig` | `internal/parser/` | 1,673 |
+| `src/Printer.zig` | `internal/printer/` | 681 |
+| `src/Renamer.zig` | `internal/renamer/` | 320 |
+| `src/Dce.zig` | `internal/dce/` | 238 |
+| `src/Minifier.zig` | `internal/minifier/` | 284 |
+| `src/Config.zig` | `internal/config/` | 86 |
+| `src/Diagnostic.zig` | `internal/diagnostic/` | 642 |
+| `src/Types.zig` | `internal/types/` | 1,327 |
+| `src/Builtins.zig` | `internal/builtins/` | 609 |
+| `src/Validator.zig` | `internal/validator/` | 1,969 |
+| `src/SourceMap.zig` | `internal/sourcemap/` | 884 |
+| `src/Reflect.zig` | `internal/reflect/` | 887 |
+| `src/wasm.zig` | `cmd/miniray-wasm/` | 80 |
+| `src/lib.zig` | `cmd/miniray-lib/` | 65 |
+| `src/root.zig` | `pkg/api/` | 42 |
+| `cli/main.zig` | `cmd/miniray/` | 163 |
+
+Total: 11,405 lines across 18 files. WASM binary is 88 KB (vs Go's 4.3 MB).
+
+## Zig-Specific Notes
+
+- Requires Zig master (0.16.x) — install via `zigup master`
+- Uses Zig 0.16's new `std.process.Init` and `std.Io` APIs for the CLI
+- `ArrayListUnmanaged` inits with `.empty` (not `.{}`)
+- `SymbolIndex` uses `enum(u32)` with `none = maxInt(u32)` — avoids Go's zero-value Ref bug
+- Renamer sort uses secondary key (symbol index) for deterministic naming — Go was updated to match
+- All AST nodes use tagged unions instead of Go interfaces

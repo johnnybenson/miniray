@@ -41,15 +41,21 @@ console.log(info.entryPoints); // Entry point metadata
 | **Validation**     | Type checking, symbol resolution, uniformity analysis          |
 | **Reflection**     | Extract bindings, struct layouts, entry points                 |
 | **Source Maps**    | Debug minified shaders with v3 source maps                     |
-| **Multi-platform** | CLI, Go library, npm/WASM, C library (FFI)                     |
+| **Multi-platform** | CLI, Go library, Zig library, npm/WASM, C library (FFI)        |
 | **Well tested**    | >99% test coverage, validated against Dawn Tint test suite     |
 
 ## Installation
 
-### CLI
+### CLI (Go)
 
 ```bash
 go install github.com/HugoDaniel/miniray/cmd/miniray@latest
+```
+
+### CLI (Zig)
+
+```bash
+cd zig && zig build    # → zig-out/bin/miniray (88 KB WASM)
 ```
 
 ### npm (Browser/Node.js)
@@ -257,10 +263,17 @@ const result = minify(source, { sourceMap: true, sourceMapSources: true });
 ## Development
 
 ```bash
+# Go
 make build      # Build CLI
-make build-wasm # Build WASM
+make build-wasm # Build WASM (4.3 MB)
 make lib        # Build C library
 make test       # Run tests
+
+# Zig (produces byte-identical output)
+cd zig
+zig build          # Build CLI
+zig build wasm     # Build WASM (88 KB)
+zig build test     # Run 152 tests
 ```
 
 ## Documentation
@@ -270,6 +283,7 @@ make test       # Run tests
 - [Why reflect WGSL?](docs/why-reflect-wgsl.md) - Benefits of shader reflection
 - [npm package docs](npm/miniray/README.md) - JavaScript/TypeScript API
 - [C API docs](docs/C-API.md) - C library reference
+- [Zig port](zig/README.md) - Zig implementation with 88 KB WASM
 - [Building with miniray](BUILDING_WITH_MINIRAY.md) - Integration guide
 - [Tint tests](docs/tint-test-import-plan.md) - Running Dawn Tint test suite
 
