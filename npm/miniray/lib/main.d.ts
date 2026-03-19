@@ -47,6 +47,19 @@ export interface MinifyOptions {
    * Identifier names that should not be renamed.
    */
   keepNames?: string[];
+
+  /**
+   * Generate a source map for the minified output.
+   * @default false
+   */
+  sourceMap?: boolean;
+
+  /**
+   * Include original source content in the source map.
+   * Only used when sourceMap is true.
+   * @default false
+   */
+  sourceMapSources?: boolean;
 }
 
 /**
@@ -73,6 +86,8 @@ export interface MinifyResult {
   originalSize: number;
   /** Size of output in bytes */
   minifiedSize: number;
+  /** Source map JSON object (only present when sourceMap option is true) */
+  sourceMap?: object;
 }
 
 /**

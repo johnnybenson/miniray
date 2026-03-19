@@ -10,19 +10,20 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const require = createRequire(import.meta.url);
 
 let _initialized = false;
 let _initPromise = null;
-let _go = null;
+let _wasm = null;
+
+const _encoder = new TextEncoder();
+const _decoder = new TextDecoder();
 
 /**
  * Initialize the WASM module.
- * @param {Object} options
+ * @param {Object} [options]
  * @param {string} [options.wasmURL] - Path to miniray.wasm
  * @param {WebAssembly.Module} [options.wasmModule] - Pre-compiled module
  * @returns {Promise<void>}
@@ -36,22 +37,7 @@ export async function initialize(options) {
   }
 
   options = options || {};
-  let wasmURL = options.wasmURL;
-  const wasmModule = options.wasmModule;
-
-  // Default to miniray.wasm in the package directory
-  // Use require.resolve to find files within the package, which works
-  // regardless of bundling or working directory
-  if (!wasmURL && !wasmModule) {
-    try {
-      wasmURL = require.resolve('miniray/miniray.wasm');
-    } catch {
-      // Fallback to relative path for local development
-      wasmURL = path.join(__dirname, '..', 'miniray.wasm');
-    }
-  }
-
-  _initPromise = _doInitialize(wasmURL, wasmModule);
+  _initPromise = _doInitialize(options);
 
   try {
     await _initPromise;
@@ -62,69 +48,49 @@ export async function initialize(options) {
   }
 }
 
-async function _doInitialize(wasmURL, wasmModule) {
-  // Load wasm_exec.js - this defines Go globally
-  // Use require.resolve to find files within the package, which works
-  // regardless of bundling or working directory
-  let wasmExecPath;
-  try {
-    wasmExecPath = require.resolve('miniray/wasm_exec.js');
-  } catch {
-    // Fallback to relative path for local development
-    wasmExecPath = path.join(__dirname, '..', 'wasm_exec.js');
-  }
+async function _doInitialize(options) {
+  let wasmModule = options.wasmModule;
 
-  if (!fs.existsSync(wasmExecPath)) {
-    throw new Error(`wasm_exec.js not found at ${wasmExecPath}`);
-  }
-
-  // Use require to load wasm_exec.js since it modifies globalThis
-  require(wasmExecPath);
-
-  if (typeof globalThis.Go === 'undefined') {
-    throw new Error('Go runtime not found after loading wasm_exec.js');
-  }
-
-  _go = new globalThis.Go();
-
-  let instance;
-  if (wasmModule) {
-    instance = await WebAssembly.instantiate(wasmModule, _go.importObject);
-  } else {
+  if (!wasmModule) {
+    let wasmURL = options.wasmURL;
+    if (!wasmURL) {
+      wasmURL = path.join(__dirname, '..', 'miniray.wasm');
+    }
     const wasmPath = wasmURL instanceof URL ? wasmURL.pathname : wasmURL;
     const wasmBuffer = fs.readFileSync(wasmPath);
-    const result = await WebAssembly.instantiate(wasmBuffer, _go.importObject);
-    instance = result.instance;
+    wasmModule = await WebAssembly.compile(wasmBuffer);
   }
 
-  // Run the Go program
-  _go.run(instance);
-
-  // Wait for __miniray to be available
-  await _waitForGlobal('__miniray', 1000);
+  const instance = await WebAssembly.instantiate(wasmModule, {});
+  _wasm = instance.exports;
 }
 
-function _waitForGlobal(name, timeout) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (typeof globalThis[name] !== 'undefined') {
-        resolve();
-      } else if (Date.now() - start > timeout) {
-        reject(new Error(`Timeout waiting for ${name} to be defined`));
-      } else {
-        setTimeout(check, 10);
-      }
-    };
-    check();
-  });
+function _writeString(s) {
+  const encoded = _encoder.encode(s);
+  if (encoded.length === 0) {
+    const ptr = _wasm.miniray_alloc(1);
+    if (!ptr) throw new Error('WASM allocation failed');
+    return { ptr, len: 0, allocLen: 1 };
+  }
+  const ptr = _wasm.miniray_alloc(encoded.length);
+  if (!ptr) throw new Error('WASM allocation failed');
+  new Uint8Array(_wasm.memory.buffer, ptr, encoded.length).set(encoded);
+  return { ptr, len: encoded.length, allocLen: encoded.length };
+}
+
+function _readResultJson(ptr) {
+  const view = new DataView(_wasm.memory.buffer);
+  const jsonLen = view.getUint32(ptr, true);
+  const json = _decoder.decode(new Uint8Array(_wasm.memory.buffer, ptr + 4, jsonLen));
+  _wasm.miniray_dealloc(ptr, jsonLen + 4);
+  return JSON.parse(json);
 }
 
 /**
  * Minify WGSL source code.
  * @param {string} source - WGSL source code
  * @param {Object} [options] - Minification options
- * @returns {Object} Result
+ * @returns {Object} Result with code, errors, originalSize, minifiedSize
  */
 export function minify(source, options) {
   if (!_initialized) {
@@ -132,10 +98,30 @@ export function minify(source, options) {
   }
 
   if (typeof source !== 'string') {
-    throw new Error('source must be a string');
+    throw new TypeError('source must be a string');
   }
 
-  return globalThis.__miniray.minify(source, options || {});
+  const opts = Object.assign({
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    treeShaking: true,
+    mangleExternalBindings: false,
+    preserveUniformStructTypes: false,
+  }, options);
+
+  const src = _writeString(source);
+  const optsJson = _writeString(JSON.stringify(opts));
+
+  const resultPtr = _wasm.miniray_minify_json(src.ptr, src.len, optsJson.ptr, optsJson.len);
+  _wasm.miniray_dealloc(src.ptr, src.allocLen);
+  _wasm.miniray_dealloc(optsJson.ptr, optsJson.allocLen);
+
+  if (!resultPtr) {
+    throw new Error('Minification failed: WASM returned null');
+  }
+
+  return _readResultJson(resultPtr);
 }
 
 /**
@@ -149,10 +135,58 @@ export function reflect(source) {
   }
 
   if (typeof source !== 'string') {
-    throw new Error('source must be a string');
+    throw new TypeError('source must be a string');
   }
 
-  return globalThis.__miniray.reflect(source);
+  const src = _writeString(source);
+  const resultPtr = _wasm.miniray_reflect(src.ptr, src.len);
+  _wasm.miniray_dealloc(src.ptr, src.allocLen);
+
+  if (!resultPtr) {
+    throw new Error('Reflection failed: WASM returned null');
+  }
+
+  return _readResultJson(resultPtr);
+}
+
+/**
+ * Validate WGSL source code.
+ * @param {string} source - WGSL source code
+ * @param {Object} [options] - Validation options
+ * @returns {Object} Validation result with valid, diagnostics, errorCount, warningCount
+ */
+export function validate(source, options) {
+  if (!_initialized) {
+    throw new Error('miniray not initialized. Call initialize() first.');
+  }
+
+  if (typeof source !== 'string') {
+    throw new TypeError('source must be a string');
+  }
+
+  const src = _writeString(source);
+  const resultPtr = _wasm.miniray_validate(src.ptr, src.len);
+  _wasm.miniray_dealloc(src.ptr, src.allocLen);
+
+  if (!resultPtr) {
+    throw new Error('Validation failed: WASM returned null');
+  }
+
+  const view = new DataView(_wasm.memory.buffer);
+  const valid = view.getUint32(resultPtr, true) === 1;
+  const errorCount = view.getUint32(resultPtr + 4, true);
+  const jsonLen = view.getUint32(resultPtr + 8, true);
+  const diagnostics = JSON.parse(
+    _decoder.decode(new Uint8Array(_wasm.memory.buffer, resultPtr + 12, jsonLen))
+  );
+  _wasm.miniray_dealloc(resultPtr, 12 + jsonLen);
+
+  let warningCount = 0;
+  for (const d of diagnostics) {
+    if (d.severity === 'warning') warningCount++;
+  }
+
+  return { valid, diagnostics, errorCount, warningCount };
 }
 
 /**
@@ -167,20 +201,15 @@ export function isInitialized() {
  * Get version.
  * @returns {string}
  */
-export function getVersion() {
+function getVersion() {
   if (!_initialized) {
     return 'unknown';
   }
-  return globalThis.__miniray.version;
+  const len = _wasm.miniray_version_len();
+  const ptr = _wasm.miniray_version();
+  return _decoder.decode(new Uint8Array(_wasm.memory.buffer, ptr, len));
 }
 
-export const version = getVersion;
+export const version = { toString: getVersion, valueOf: getVersion };
 
-// Default export
-export default {
-  initialize,
-  minify,
-  reflect,
-  isInitialized,
-  version: getVersion
-};
+export default { initialize, minify, reflect, validate, isInitialized, version };

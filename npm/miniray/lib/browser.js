@@ -20,7 +20,10 @@
 
   let _initialized = false;
   let _initPromise = null;
-  let _go = null;
+  let _wasm = null;
+
+  const _encoder = new TextEncoder();
+  const _decoder = new TextDecoder();
 
   /**
    * Initialize the WASM module.
@@ -57,84 +60,68 @@
   }
 
   async function _doInitialize(wasmURL, wasmModule) {
-    // Load wasm_exec.js if Go is not defined
-    if (typeof Go === 'undefined') {
-      throw new Error(
-        'Go runtime not found. Make sure to include wasm_exec.js before using miniray:\n' +
-        '<script src="wasm_exec.js"></script>'
-      );
+    if (wasmModule) {
+      const instance = await WebAssembly.instantiate(wasmModule, {});
+      _wasm = instance.exports;
+      return;
     }
 
-    _go = new Go();
+    const url = wasmURL instanceof URL ? wasmURL.href : wasmURL;
 
-    let instance;
-    if (wasmModule) {
-      // Use pre-compiled module
-      instance = await WebAssembly.instantiate(wasmModule, _go.importObject);
-    } else {
-      // Fetch and instantiate
-      const url = wasmURL instanceof URL ? wasmURL.href : wasmURL;
-
-      if (typeof WebAssembly.instantiateStreaming === 'function') {
-        try {
-          const response = await fetch(url);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch ${url}: ${response.status}`);
-          }
-          const result = await WebAssembly.instantiateStreaming(response, _go.importObject);
-          instance = result.instance;
-        } catch (err) {
-          // Fall back to arrayBuffer if streaming fails (e.g., wrong MIME type)
-          if (err.message && err.message.includes('MIME')) {
-            const response = await fetch(url);
-            const bytes = await response.arrayBuffer();
-            const result = await WebAssembly.instantiate(bytes, _go.importObject);
-            instance = result.instance;
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        // Fallback for older browsers
+    if (typeof WebAssembly.instantiateStreaming === 'function') {
+      try {
         const response = await fetch(url);
-        const bytes = await response.arrayBuffer();
-        const result = await WebAssembly.instantiate(bytes, _go.importObject);
-        instance = result.instance;
+        if (!response.ok) {
+          throw new Error('Failed to fetch ' + url + ': ' + response.status);
+        }
+        const result = await WebAssembly.instantiateStreaming(response, {});
+        _wasm = result.instance.exports;
+        return;
+      } catch (err) {
+        // Fall back to arrayBuffer if streaming fails (e.g., wrong MIME type)
+        if (err.message && err.message.includes('MIME')) {
+          const response = await fetch(url);
+          const bytes = await response.arrayBuffer();
+          const result = await WebAssembly.instantiate(bytes, {});
+          _wasm = result.instance.exports;
+          return;
+        }
+        throw err;
       }
     }
 
-    // Run the Go program (this sets up __miniray global)
-    _go.run(instance);
-
-    // Wait for __miniray to be available
-    await _waitForGlobal('__miniray', 1000);
+    // Fallback for older browsers
+    const response = await fetch(url);
+    const bytes = await response.arrayBuffer();
+    const result = await WebAssembly.instantiate(bytes, {});
+    _wasm = result.instance.exports;
   }
 
-  function _waitForGlobal(name, timeout) {
-    return new Promise((resolve, reject) => {
-      const start = Date.now();
-      const check = () => {
-        if (typeof globalThis[name] !== 'undefined') {
-          resolve();
-        } else if (Date.now() - start > timeout) {
-          reject(new Error(`Timeout waiting for ${name} to be defined`));
-        } else {
-          setTimeout(check, 10);
-        }
-      };
-      check();
-    });
+  function _writeString(s) {
+    var encoded = _encoder.encode(s);
+    if (encoded.length === 0) {
+      var ptr = _wasm.miniray_alloc(1);
+      if (!ptr) throw new Error('WASM allocation failed');
+      return { ptr: ptr, len: 0, allocLen: 1 };
+    }
+    var ptr = _wasm.miniray_alloc(encoded.length);
+    if (!ptr) throw new Error('WASM allocation failed');
+    new Uint8Array(_wasm.memory.buffer, ptr, encoded.length).set(encoded);
+    return { ptr: ptr, len: encoded.length, allocLen: encoded.length };
+  }
+
+  function _readResultJson(ptr) {
+    var view = new DataView(_wasm.memory.buffer);
+    var jsonLen = view.getUint32(ptr, true);
+    var json = _decoder.decode(new Uint8Array(_wasm.memory.buffer, ptr + 4, jsonLen));
+    _wasm.miniray_dealloc(ptr, jsonLen + 4);
+    return JSON.parse(json);
   }
 
   /**
    * Minify WGSL source code.
    * @param {string} source - WGSL source code
    * @param {Object} [options] - Minification options
-   * @param {boolean} [options.minifyWhitespace=true] - Remove whitespace
-   * @param {boolean} [options.minifyIdentifiers=true] - Rename identifiers
-   * @param {boolean} [options.minifySyntax=true] - Optimize syntax
-   * @param {boolean} [options.mangleExternalBindings=false] - Mangle uniform/storage names
-   * @param {string[]} [options.keepNames] - Names to preserve
    * @returns {Object} Result with code, errors, originalSize, minifiedSize
    */
   function minify(source, options) {
@@ -143,10 +130,30 @@
     }
 
     if (typeof source !== 'string') {
-      throw new Error('source must be a string');
+      throw new TypeError('source must be a string');
     }
 
-    return globalThis.__miniray.minify(source, options || {});
+    var opts = Object.assign({
+      minifyWhitespace: true,
+      minifyIdentifiers: true,
+      minifySyntax: true,
+      treeShaking: true,
+      mangleExternalBindings: false,
+      preserveUniformStructTypes: false,
+    }, options);
+
+    var src = _writeString(source);
+    var optsJson = _writeString(JSON.stringify(opts));
+
+    var resultPtr = _wasm.miniray_minify_json(src.ptr, src.len, optsJson.ptr, optsJson.len);
+    _wasm.miniray_dealloc(src.ptr, src.allocLen);
+    _wasm.miniray_dealloc(optsJson.ptr, optsJson.allocLen);
+
+    if (!resultPtr) {
+      throw new Error('Minification failed: WASM returned null');
+    }
+
+    return _readResultJson(resultPtr);
   }
 
   /**
@@ -160,18 +167,24 @@
     }
 
     if (typeof source !== 'string') {
-      throw new Error('source must be a string');
+      throw new TypeError('source must be a string');
     }
 
-    return globalThis.__miniray.reflect(source);
+    var src = _writeString(source);
+    var resultPtr = _wasm.miniray_reflect(src.ptr, src.len);
+    _wasm.miniray_dealloc(src.ptr, src.allocLen);
+
+    if (!resultPtr) {
+      throw new Error('Reflection failed: WASM returned null');
+    }
+
+    return _readResultJson(resultPtr);
   }
 
   /**
    * Validate WGSL source code.
    * @param {string} source - WGSL source code
    * @param {Object} [options] - Validation options
-   * @param {boolean} [options.strictMode] - Treat warnings as errors
-   * @param {Object} [options.diagnosticFilters] - Map of rule name to severity
    * @returns {Object} Validation result with valid, diagnostics, errorCount, warningCount
    */
   function validate(source, options) {
@@ -180,10 +193,32 @@
     }
 
     if (typeof source !== 'string') {
-      throw new Error('source must be a string');
+      throw new TypeError('source must be a string');
     }
 
-    return globalThis.__miniray.validate(source, options || {});
+    var src = _writeString(source);
+    var resultPtr = _wasm.miniray_validate(src.ptr, src.len);
+    _wasm.miniray_dealloc(src.ptr, src.allocLen);
+
+    if (!resultPtr) {
+      throw new Error('Validation failed: WASM returned null');
+    }
+
+    var view = new DataView(_wasm.memory.buffer);
+    var valid = view.getUint32(resultPtr, true) === 1;
+    var errorCount = view.getUint32(resultPtr + 4, true);
+    var jsonLen = view.getUint32(resultPtr + 8, true);
+    var diagnostics = JSON.parse(
+      _decoder.decode(new Uint8Array(_wasm.memory.buffer, resultPtr + 12, jsonLen))
+    );
+    _wasm.miniray_dealloc(resultPtr, 12 + jsonLen);
+
+    var warningCount = 0;
+    for (var i = 0; i < diagnostics.length; i++) {
+      if (diagnostics[i].severity === 'warning') warningCount++;
+    }
+
+    return { valid: valid, diagnostics: diagnostics, errorCount: errorCount, warningCount: warningCount };
   }
 
   /**
@@ -202,7 +237,9 @@
     if (!_initialized) {
       return 'unknown';
     }
-    return globalThis.__miniray.version;
+    var len = _wasm.miniray_version_len();
+    var ptr = _wasm.miniray_version();
+    return _decoder.decode(new Uint8Array(_wasm.memory.buffer, ptr, len));
   }
 
   return {
