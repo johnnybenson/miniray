@@ -53,15 +53,14 @@ pub const Options = struct {
 pub const Result = struct {
     valid: bool,
     diagnostics: *Diagnostic,
-    _arena: ?*std.heap.ArenaAllocator = null,
+    _arena: ?std.heap.ArenaAllocator = null,
 
     /// Free all memory owned by this result. After calling deinit,
     /// the diagnostics pointer is invalid.
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
-        const arena = self._arena orelse return;
         _ = allocator;
+        var arena = self._arena orelse return;
         arena.deinit();
-        arena.child_allocator.destroy(arena);
         self._arena = null;
     }
 };

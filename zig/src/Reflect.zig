@@ -17,16 +17,15 @@ pub const ReflectResult = struct {
     structs: std.StringHashMapUnmanaged(StructLayout) = .{},
     entry_points: std.ArrayListUnmanaged(EntryPointInfo) = .empty,
     errors: std.ArrayListUnmanaged([]const u8) = .empty,
-    _arena: ?*std.heap.ArenaAllocator = null,
+    _arena: ?std.heap.ArenaAllocator = null,
 
     /// Free all memory owned by this result. If this result was created
     /// through the public API (root.zig), deinits the internal arena.
     /// After calling deinit, all slices and pointers in the result are invalid.
     pub fn deinit(self: *ReflectResult, allocator: std.mem.Allocator) void {
-        if (self._arena) |arena| {
-            const backing = arena.child_allocator;
+        if (self._arena) |_| {
+            var arena = self._arena.?;
             arena.deinit();
-            backing.destroy(arena);
             self._arena = null;
         } else {
             self.bindings.deinit(allocator);

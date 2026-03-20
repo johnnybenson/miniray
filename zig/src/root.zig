@@ -24,16 +24,6 @@ pub const Reflect = @import("Reflect.zig");
 pub const SourceMap = @import("SourceMap.zig");
 
 // =========================================================================
-// Arena helpers
-// =========================================================================
-
-fn createArena(allocator: Allocator) !*std.heap.ArenaAllocator {
-    const arena = try allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(allocator);
-    return arena;
-}
-
-// =========================================================================
 // Minify API
 // =========================================================================
 
@@ -46,11 +36,8 @@ pub fn minify(allocator: Allocator, source: [:0]const u8) !Minifier.Result {
 /// Minify WGSL source with custom options.
 /// Call `result.deinit(allocator)` to free all memory.
 pub fn minifyWithOptions(allocator: Allocator, source: [:0]const u8, options: Minifier.Options) !Minifier.Result {
-    const arena = try createArena(allocator);
-    errdefer {
-        arena.deinit();
-        allocator.destroy(arena);
-    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
 
     var result = try Minifier.minify(arena.allocator(), source, options);
     result._arena = arena;
@@ -60,11 +47,8 @@ pub fn minifyWithOptions(allocator: Allocator, source: [:0]const u8, options: Mi
 /// Minify and reflect in a single pass.
 /// Call `result.deinit(allocator)` to free all memory.
 pub fn minifyAndReflect(allocator: Allocator, source: [:0]const u8, options: Minifier.Options) !Minifier.MinifyAndReflectResult {
-    const arena = try createArena(allocator);
-    errdefer {
-        arena.deinit();
-        allocator.destroy(arena);
-    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
 
     var result = try Minifier.minifyAndReflect(arena.allocator(), source, options);
     result._arena = arena;
@@ -84,11 +68,8 @@ pub fn validate(allocator: Allocator, source: [:0]const u8) !Validator.Result {
 /// Validate WGSL source with custom options.
 /// Call `result.deinit(allocator)` to free all memory.
 pub fn validateWithOptions(allocator: Allocator, source: [:0]const u8, options: Validator.Options) !Validator.Result {
-    const arena = try createArena(allocator);
-    errdefer {
-        arena.deinit();
-        allocator.destroy(arena);
-    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
 
     const alloc = arena.allocator();
     const tokens = try Lexer.tokenize(alloc, source);
@@ -113,11 +94,8 @@ pub fn validateWithOptions(allocator: Allocator, source: [:0]const u8, options: 
 /// Reflect WGSL source (extract bindings, layouts, entry points).
 /// Call `result.deinit(allocator)` to free all memory.
 pub fn reflect(allocator: Allocator, source: [:0]const u8) !Reflect.ReflectResult {
-    const arena = try createArena(allocator);
-    errdefer {
-        arena.deinit();
-        allocator.destroy(arena);
-    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
 
     const alloc = arena.allocator();
     const tokens = try Lexer.tokenize(alloc, source);

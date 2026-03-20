@@ -43,15 +43,14 @@ pub const Result = struct {
     source_map: ?SourceMap.Result = null,
     /// Internal arena owning all allocated data. Call `deinit()` to free.
     /// Null when called directly (caller manages memory).
-    _arena: ?*std.heap.ArenaAllocator = null,
+    _arena: ?std.heap.ArenaAllocator = null,
 
     /// Free all memory owned by this result. After calling deinit, all
     /// slices (code, errors, source_map) are invalid.
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
-        const arena = self._arena orelse return;
         _ = allocator;
+        var arena = self._arena orelse return;
         arena.deinit();
-        arena.child_allocator.destroy(arena);
         self._arena = null;
     }
 };
@@ -135,13 +134,12 @@ pub fn minify(allocator: std.mem.Allocator, source: [:0]const u8, options: Optio
 pub const MinifyAndReflectResult = struct {
     minify: Result,
     reflect: Reflect.ReflectResult,
-    _arena: ?*std.heap.ArenaAllocator = null,
+    _arena: ?std.heap.ArenaAllocator = null,
 
     pub fn deinit(self: *MinifyAndReflectResult, allocator: std.mem.Allocator) void {
-        const arena = self._arena orelse return;
         _ = allocator;
+        var arena = self._arena orelse return;
         arena.deinit();
-        arena.child_allocator.destroy(arena);
         self._arena = null;
     }
 };
