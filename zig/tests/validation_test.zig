@@ -127,10 +127,10 @@ fn runValidation(allocator: std.mem.Allocator, source_bytes: []const u8) miniray
 
     var tokens = miniray.Lexer.tokenize(allocator, source) catch return .{ .valid = false, .diagnostics = undefined };
     _ = &tokens;
-    var parser = miniray.Parser.init(allocator, source, tokens);
+    var parser = miniray.Parser.init(allocator, source, tokens) catch return .{ .valid = false, .diagnostics = undefined };
     const module = parser.parse() catch return .{ .valid = false, .diagnostics = undefined };
 
-    return miniray.Validator.validate(allocator, module, .{});
+    return miniray.Validator.validate(allocator, module, .{}) catch return .{ .valid = false, .diagnostics = undefined };
 }
 
 // =========================================================================

@@ -71,7 +71,7 @@ const result = try miniray.minifyWithOptions(allocator, source, .{
 });
 
 // Validate
-const vresult = miniray.Validator.validate(allocator, module, .{});
+const vresult = try miniray.Validator.validate(allocator, module, .{});
 if (!vresult.valid) { /* handle errors */ }
 ```
 

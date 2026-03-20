@@ -73,7 +73,7 @@ pub fn validateWithOptions(allocator: Allocator, source: [:0]const u8, options: 
 
     const alloc = arena.allocator();
     const tokens = try Lexer.tokenize(alloc, source);
-    var parser = Parser.init(alloc, source, tokens);
+    var parser = try Parser.init(alloc, source, tokens);
     const module = parser.parse() catch {
         const diags = try alloc.create(Diagnostic);
         diags.* = Diagnostic.init(alloc, source);
@@ -82,7 +82,7 @@ pub fn validateWithOptions(allocator: Allocator, source: [:0]const u8, options: 
         }
         return .{ .valid = false, .diagnostics = diags, ._arena = arena };
     };
-    var result = Validator.validate(alloc, module, options);
+    var result = try Validator.validate(alloc, module, options);
     result._arena = arena;
     return result;
 }
@@ -99,7 +99,7 @@ pub fn reflect(allocator: Allocator, source: [:0]const u8) !Reflect.ReflectResul
 
     const alloc = arena.allocator();
     const tokens = try Lexer.tokenize(alloc, source);
-    var parser = Parser.init(alloc, source, tokens);
+    var parser = try Parser.init(alloc, source, tokens);
     const module = parser.parse() catch {
         var result = Reflect.ReflectResult{};
         result.errors.append(alloc, "parse error") catch {};

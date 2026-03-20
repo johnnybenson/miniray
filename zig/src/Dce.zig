@@ -249,7 +249,7 @@ const Parser = @import("Parser.zig");
 fn parseModule(allocator: std.mem.Allocator, source: [:0]const u8) ?*Ast.Module {
     var tokens = Lexer.tokenize(allocator, source) catch return null;
     defer tokens.deinit(allocator);
-    var parser = Parser.init(allocator, source, tokens);
+    var parser = Parser.init(allocator, source, tokens) catch return null;
     return parser.parse() catch null;
 }
 

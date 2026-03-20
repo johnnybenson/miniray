@@ -116,7 +116,7 @@ fn testRoundtripStability(allocator: std.mem.Allocator, source_bytes: []const u8
     // First pass: parse + print (whitespace only, no renaming)
     var tokens1 = try miniray.Lexer.tokenize(allocator, source);
     _ = &tokens1;
-    var parser1 = miniray.Parser.init(allocator, source, tokens1);
+    var parser1 = try miniray.Parser.init(allocator, source, tokens1);
     const module1 = try parser1.parse();
 
     const RenamerMod = miniray.Renamer;
@@ -137,7 +137,7 @@ fn testRoundtripStability(allocator: std.mem.Allocator, source_bytes: []const u8
     const output1_z = try makeSentinel(allocator, output1);
     var tokens2 = try miniray.Lexer.tokenize(allocator, output1_z);
     _ = &tokens2;
-    var parser2 = miniray.Parser.init(allocator, output1_z, tokens2);
+    var parser2 = try miniray.Parser.init(allocator, output1_z, tokens2);
     const module2 = try parser2.parse();
 
     const noop2 = try allocator.create(RenamerMod.NoOpRenamer);
@@ -192,7 +192,7 @@ fn testComputeToysShader(allocator: std.mem.Allocator, source_bytes: []const u8)
     const min_source = try makeSentinel(allocator, result.code);
     var tokens = try miniray.Lexer.tokenize(allocator, min_source);
     _ = &tokens;
-    var parser = miniray.Parser.init(allocator, min_source, tokens);
+    var parser = try miniray.Parser.init(allocator, min_source, tokens);
     _ = try parser.parse();
 
     // Check required names are preserved

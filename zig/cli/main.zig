@@ -208,7 +208,7 @@ fn runValidate(allocator: std.mem.Allocator, io: std.Io, source: [:0]const u8) !
 
     // Tokenize + parse
     const tokens = try miniray.Lexer.tokenize(allocator, source);
-    var parser = miniray.Parser.init(allocator, source, tokens);
+    var parser = try miniray.Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         try File.stderr().writeStreamingAll(io, "error: parse failed\n");
         for (parser.errors.items) |err| {
@@ -220,7 +220,7 @@ fn runValidate(allocator: std.mem.Allocator, io: std.Io, source: [:0]const u8) !
     };
 
     // Validate
-    const result = miniray.Validator.validate(allocator, module, .{});
+    const result = try miniray.Validator.validate(allocator, module, .{});
 
     if (result.valid) {
         try File.stdout().writeStreamingAll(io, "valid\n");
@@ -241,7 +241,7 @@ fn runReflect(allocator: std.mem.Allocator, io: std.Io, source: [:0]const u8) !v
 
     // Tokenize + parse
     const tokens = try miniray.Lexer.tokenize(allocator, source);
-    var parser = miniray.Parser.init(allocator, source, tokens);
+    var parser = try miniray.Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         try File.stderr().writeStreamingAll(io, "error: parse failed\n");
         for (parser.errors.items) |err| {

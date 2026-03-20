@@ -96,14 +96,8 @@ alias_types: std.StringHashMapUnmanaged(?Types.Type) = .{},
 // =========================================================================
 
 /// Validate a parsed WGSL module.
-pub fn validate(allocator: Allocator, module: *Ast.Module, options: Options) Result {
-    var diags = allocator.create(Diagnostic) catch {
-        // If we cannot even allocate diagnostics, return invalid with a null-ish result.
-        // In practice this should never happen.
-        const fallback = allocator.create(Diagnostic) catch unreachable;
-        fallback.* = Diagnostic.init(allocator, module.source);
-        return .{ .valid = false, .diagnostics = fallback };
-    };
+pub fn validate(allocator: Allocator, module: *Ast.Module, options: Options) !Result {
+    const diags = try allocator.create(Diagnostic);
     diags.* = Diagnostic.init(allocator, module.source);
 
     var v = Validator{
@@ -2063,7 +2057,7 @@ test "validate empty module" {
     const allocator = std.testing.allocator;
     var scope = Ast.Scope.init(null);
     var module = Ast.Module.init(&scope, "");
-    const result = validate(allocator, &module, .{});
+    const result = try validate(allocator, &module, .{});
     defer allocator.destroy(result.diagnostics);
     defer result.diagnostics.deinit(allocator);
     try std.testing.expect(result.valid);

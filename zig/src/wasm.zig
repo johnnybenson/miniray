@@ -144,7 +144,7 @@ export fn miniray_validate(source_ptr: [*]const u8, source_len: u32) ?[*]u8 {
 
     // Tokenize + parse
     const tokens = Lexer.tokenize(wasm_allocator, source) catch return null;
-    var parser = Parser.init(wasm_allocator, source, tokens);
+    var parser = Parser.init(wasm_allocator, source, tokens) catch return null;
     const module = parser.parse() catch {
         // Build diagnostics JSON from parse errors
         var json_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -162,7 +162,7 @@ export fn miniray_validate(source_ptr: [*]const u8, source_len: u32) ?[*]u8 {
     }
 
     // Validate
-    const result = Validator.validate(wasm_allocator, module, .{});
+    const result = Validator.validate(wasm_allocator, module, .{}) catch return null;
     const error_count = result.diagnostics.diagnostics.items.len;
 
     // Serialize diagnostics to JSON
@@ -237,7 +237,7 @@ export fn miniray_reflect(source_ptr: [*]const u8, source_len: u32) ?[*]u8 {
 
     // Tokenize + parse
     const tokens = Lexer.tokenize(wasm_allocator, source) catch return null;
-    var parser = Parser.init(wasm_allocator, source, tokens);
+    var parser = Parser.init(wasm_allocator, source, tokens) catch return null;
     const module = parser.parse() catch {
         // Return empty result with error
         return packReflectError(parser.errors.items);

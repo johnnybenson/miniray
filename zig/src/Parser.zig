@@ -38,8 +38,8 @@ pub const ParseError = struct {
 // Initialization
 // =========================================================================
 
-pub fn init(allocator: std.mem.Allocator, source: [:0]const u8, tokens: std.MultiArrayList(Lexer.Token)) Parser {
-    const scope = allocator.create(Ast.Scope) catch @panic("OOM");
+pub fn init(allocator: std.mem.Allocator, source: [:0]const u8, tokens: std.MultiArrayList(Lexer.Token)) !Parser {
+    const scope = try allocator.create(Ast.Scope);
     scope.* = Ast.Scope.init(null);
 
     return .{
@@ -211,19 +211,19 @@ fn addError(self: *Parser, message: []const u8) void {
 // Symbol table (Pass 1)
 // =========================================================================
 
-fn declareSymbol(self: *Parser, name: []const u8, kind: Ast.Symbol.Kind, flags: Ast.Symbol.Flags, loc: u32) Ast.SymbolIndex {
+fn declareSymbol(self: *Parser, name: []const u8, kind: Ast.Symbol.Kind, flags: Ast.Symbol.Flags, loc: u32) !Ast.SymbolIndex {
     const idx: u32 = @intCast(self.symbols.items.len);
-    self.symbols.append(self.allocator, .{
+    try self.symbols.append(self.allocator, .{
         .original_name = name,
         .kind = kind,
         .flags = flags,
         .use_count = 0,
         .loc = loc,
-    }) catch @panic("OOM");
-    self.scope.members.put(self.allocator, name, .{
+    });
+    try self.scope.members.put(self.allocator, name, .{
         .ref = @enumFromInt(idx),
         .loc = loc,
-    }) catch @panic("OOM");
+    });
     return @enumFromInt(idx);
 }
 
@@ -243,12 +243,12 @@ fn lookupSymbol(self: *const Parser, name: []const u8) ?Ast.SymbolIndex {
     return null;
 }
 
-fn pushScope(self: *Parser) void {
-    const new_scope = self.allocator.create(Ast.Scope) catch @panic("OOM");
+fn pushScope(self: *Parser) !void {
+    const new_scope = try self.allocator.create(Ast.Scope);
     new_scope.* = Ast.Scope.init(self.scope);
-    self.scope.children.append(self.allocator, new_scope) catch @panic("OOM");
+    try self.scope.children.append(self.allocator, new_scope);
     self.scope = new_scope;
-    self.scopes_in_order.append(self.allocator, new_scope) catch @panic("OOM");
+    try self.scopes_in_order.append(self.allocator, new_scope);
 }
 
 fn popScope(self: *Parser) void {
@@ -592,7 +592,7 @@ fn parseConstDecl(self: *Parser) !*Ast.ConstDecl {
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        decl.name = self.declareSymbol(text, .@"const", .{}, loc);
+        decl.name = try self.declareSymbol(text, .@"const", .{}, loc);
     }
 
     if (self.eat(.colon)) decl.typ = try self.parseType();
@@ -611,7 +611,7 @@ fn parseOverrideDecl(self: *Parser, attrs: *std.ArrayListUnmanaged(Ast.Attribute
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        decl.name = self.declareSymbol(text, .override, .{}, loc);
+        decl.name = try self.declareSymbol(text, .override, .{}, loc);
     }
 
     if (self.eat(.colon)) decl.typ = try self.parseType();
@@ -641,7 +641,7 @@ fn parseVarDecl(self: *Parser, attrs: *std.ArrayListUnmanaged(Ast.Attribute)) !*
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        decl.name = self.declareSymbol(text, .@"var", flags, loc);
+        decl.name = try self.declareSymbol(text, .@"var", flags, loc);
     }
 
     if (self.eat(.colon)) decl.typ = try self.parseType();
@@ -659,7 +659,7 @@ fn parseLetDecl(self: *Parser) !*Ast.LetDecl {
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        decl.name = self.declareSymbol(text, .let, .{}, loc);
+        decl.name = try self.declareSymbol(text, .let, .{}, loc);
     }
 
     if (self.eat(.colon)) decl.typ = try self.parseType();
@@ -701,10 +701,10 @@ fn parseFunctionDecl(self: *Parser, attrs: *std.ArrayListUnmanaged(Ast.Attribute
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        decl.name = self.declareSymbol(text, .function, flags, loc);
+        decl.name = try self.declareSymbol(text, .function, flags, loc);
     }
 
-    self.pushScope();
+    try self.pushScope();
 
     _ = self.expect(.l_paren);
     if (self.currentTag() != .r_paren) {
@@ -730,7 +730,7 @@ fn parseParameters(self: *Parser) !std.ArrayListUnmanaged(Ast.Parameter) {
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        const name = self.declareSymbol(text, .parameter, .{}, loc);
+        const name = try self.declareSymbol(text, .parameter, .{}, loc);
         _ = self.expect(.colon);
         const typ = try self.parseType();
         try params.append(self.allocator, .{ .attributes = param_attrs, .name = name, .typ = typ });
@@ -749,7 +749,7 @@ fn parseStructDecl(self: *Parser) !*Ast.StructDecl {
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        decl.name = self.declareSymbol(text, .@"struct", .{}, loc);
+        decl.name = try self.declareSymbol(text, .@"struct", .{}, loc);
     }
 
     _ = self.expect(.l_brace);
@@ -759,7 +759,7 @@ fn parseStructDecl(self: *Parser) !*Ast.StructDecl {
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        const name = self.declareSymbol(text, .member, .{}, loc);
+        const name = try self.declareSymbol(text, .member, .{}, loc);
         _ = self.expect(.colon);
         const typ = try self.parseType();
         try decl.members.append(self.allocator, .{ .attributes = member_attrs, .name = name, .typ = typ });
@@ -777,7 +777,7 @@ fn parseAliasDecl(self: *Parser) !*Ast.AliasDecl {
         const text = self.currentText();
         const loc = self.currentStart();
         self.advance();
-        name = self.declareSymbol(text, .alias, .{}, loc);
+        name = try self.declareSymbol(text, .alias, .{}, loc);
     }
     _ = self.expect(.eq);
     const typ = try self.parseType();
@@ -1376,7 +1376,7 @@ fn parseStatement(self: *Parser) error{OutOfMemory, ParseFailed}!?Ast.Stmt {
 
 fn parseCompoundStmt(self: *Parser) !*Ast.CompoundStmt {
     _ = self.expect(.l_brace);
-    self.pushScope();
+    try self.pushScope();
     const stmt = try self.allocator.create(Ast.CompoundStmt);
     stmt.* = .{ .stmts = .empty };
     while (self.currentTag() != .r_brace and self.currentTag() != .eof) {
@@ -1447,7 +1447,7 @@ fn parseSwitchStmt(self: *Parser) !*Ast.SwitchStmt {
 fn parseForStmt(self: *Parser) !*Ast.ForStmt {
     _ = self.expect(.keyword_for);
     _ = self.expect(.l_paren);
-    self.pushScope();
+    try self.pushScope();
     const node = try self.allocator.create(Ast.ForStmt);
     node.* = .{ .body = undefined };
 
@@ -1658,7 +1658,7 @@ test "parse simple const" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var parser = Parser.init(alloc, source, tokens);
+    var parser = try Parser.init(alloc, source, tokens);
     const module = try parser.parse();
     _ = module;
     try std.testing.expectEqual(@as(usize, 1), parser.symbols.items.len);
@@ -1675,7 +1675,7 @@ fn expectPrinted(input: [:0]const u8, expected: []const u8) !void {
     const alloc = arena.allocator();
 
     const tokens = try Lexer.tokenize(alloc, input);
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     const module = try parser.parse();
 
     const Renamer = @import("Renamer.zig");
@@ -1702,7 +1702,7 @@ fn expectPrintedMinify(input: [:0]const u8, expected: []const u8) !void {
     const alloc = arena.allocator();
 
     const tokens = try Lexer.tokenize(alloc, input);
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     const module = try parser.parse();
 
     const Renamer = @import("Renamer.zig");
@@ -1729,7 +1729,7 @@ fn expectParseError(input: [:0]const u8) !void {
     const alloc = arena.allocator();
 
     const tokens = try Lexer.tokenize(alloc, input);
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     _ = parser.parse() catch return; // error return is sufficient
     if (parser.errors.items.len > 0) return;
     return error.TestExpectedError;
@@ -1741,7 +1741,7 @@ fn expectNoError(input: [:0]const u8) !void {
     const alloc = arena.allocator();
 
     const tokens = try Lexer.tokenize(alloc, input);
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     _ = try parser.parse();
     try std.testing.expectEqual(@as(usize, 0), parser.errors.items.len);
 }

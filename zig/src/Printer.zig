@@ -736,7 +736,7 @@ fn expectPrinted(input: [:0]const u8, expected: []const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     const module = try parser.parse();
 
     var printer = Printer.init(alloc, .{}, module.symbols.items);
@@ -753,7 +753,7 @@ fn expectPrintedMinify(input: [:0]const u8, expected: []const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     const module = try parser.parse();
 
     var printer = Printer.init(alloc, .{ .minify_whitespace = true }, module.symbols.items);
@@ -770,7 +770,7 @@ fn expectPrintedMangle(input: [:0]const u8, expected: []const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var parser = Parser.init(alloc, input, tokens);
+    var parser = try Parser.init(alloc, input, tokens);
     const module = try parser.parse();
 
     var printer = Printer.init(alloc, .{ .minify_syntax = true }, module.symbols.items);
@@ -1318,7 +1318,7 @@ test "printer: roundtrip" {
         var arena1 = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena1.deinit();
         const alloc1 = arena1.allocator();
-        var parser1 = Parser.init(alloc1, input, tokens1);
+        var parser1 = try Parser.init(alloc1, input, tokens1);
         const module1 = try parser1.parse();
         var printer1 = Printer.init(alloc1, .{}, module1.symbols.items);
         defer printer1.deinit();
@@ -1334,7 +1334,7 @@ test "printer: roundtrip" {
         var arena2 = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena2.deinit();
         const alloc2 = arena2.allocator();
-        var parser2 = Parser.init(alloc2, sentinel1, tokens2);
+        var parser2 = try Parser.init(alloc2, sentinel1, tokens2);
         const module2 = try parser2.parse();
         var printer2 = Printer.init(alloc2, .{}, module2.symbols.items);
         defer printer2.deinit();
