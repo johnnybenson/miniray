@@ -116,6 +116,9 @@ pub fn validate(allocator: Allocator, module: *Ast.Module, options: Options) !Re
     // Phase 3: Validate declarations
     v.validateDeclarations();
 
+    // Phase 3.5: Register function signatures (enables forward references)
+    v.registerFunctionSignatures();
+
     // Phase 4: Validate functions and statements
     v.validateFunctions();
 
@@ -241,7 +244,8 @@ fn validateConstDecl(v: *Validator, d: *Ast.ConstDecl) void {
             }
         }
     } else {
-        decl_type = init_type;
+        // Infer type from initializer, converting abstract to concrete
+        decl_type = Types.concreteType(init_type);
     }
 
     // const must have constructible type
@@ -304,6 +308,8 @@ fn validateVarDecl(v: *Validator, d: *Ast.VarDecl) void {
         decl_type = v.resolveType(ast_type);
     } else if (d.initializer) |init| {
         decl_type = v.checkExpr(init);
+        // Convert abstract types to concrete for var declarations
+        if (decl_type) |dt| decl_type = Types.concreteType(dt);
     }
 
     if (decl_type == null) {
@@ -392,6 +398,41 @@ fn validateAddressSpace(v: *Validator, d: *Ast.VarDecl, var_type: Types.Type) vo
             }
         },
         else => {},
+    }
+}
+
+// =========================================================================
+// Phase 3.5: Register Function Signatures
+// =========================================================================
+
+/// Pre-registers all function types before validating bodies.
+/// This enables forward references — function A can call function B
+/// even if B is declared after A.
+fn registerFunctionSignatures(v: *Validator) void {
+    for (v.module.declarations.items) |decl| {
+        switch (decl) {
+            .function => |fn_decl| {
+                var param_types: std.ArrayListUnmanaged(Types.Type) = .empty;
+                for (fn_decl.parameters.items) |param| {
+                    if (v.resolveType(param.typ)) |pt| {
+                        param_types.append(v.allocator, pt) catch {};
+                    }
+                }
+
+                var return_type: ?Types.Type = null;
+                if (fn_decl.return_type) |rt| {
+                    return_type = v.resolveType(rt);
+                }
+
+                if (fn_decl.name.isValid()) {
+                    const fn_type = Types.functionType(v.allocator, param_types.items, return_type) catch null;
+                    if (fn_type) |ft| {
+                        v.setSymbolType(fn_decl.name, ft);
+                    }
+                }
+            },
+            else => {},
+        }
     }
 }
 
@@ -558,7 +599,9 @@ fn isFragmentInput(name: []const u8) bool {
     return std.mem.eql(u8, name, "position") or
         std.mem.eql(u8, name, "front_facing") or
         std.mem.eql(u8, name, "sample_index") or
-        std.mem.eql(u8, name, "sample_mask");
+        std.mem.eql(u8, name, "sample_mask") or
+        std.mem.eql(u8, name, "subgroup_invocation_id") or
+        std.mem.eql(u8, name, "subgroup_size");
 }
 
 fn isFragmentOutput(name: []const u8) bool {
@@ -571,7 +614,9 @@ fn isComputeInput(name: []const u8) bool {
         std.mem.eql(u8, name, "local_invocation_index") or
         std.mem.eql(u8, name, "global_invocation_id") or
         std.mem.eql(u8, name, "workgroup_id") or
-        std.mem.eql(u8, name, "num_workgroups");
+        std.mem.eql(u8, name, "num_workgroups") or
+        std.mem.eql(u8, name, "subgroup_invocation_id") or
+        std.mem.eql(u8, name, "subgroup_size");
 }
 
 // =========================================================================
@@ -868,12 +913,24 @@ fn checkBinary(v: *Validator, e: *Ast.BinaryExpr) ?Types.Type {
                 v.addErrorWithCode(0, Diagnostic.Code.invalid_operand, "comparison requires compatible types");
                 return null;
             }
+            // Vector comparisons return vec<N, bool>
+            if (left_type == .vector) {
+                const bvec = v.allocator.create(Types.Vector) catch return Types.Bool;
+                bvec.* = .{ .width = left_type.vector.width, .element = Types.scalar_bool_ptr };
+                return .{ .vector = bvec };
+            }
             return Types.Bool;
         },
         .lt, .le, .gt, .ge => {
             if (!Types.isNumeric(left_type) or !Types.isNumeric(right_type)) {
                 v.addErrorWithCode(0, Diagnostic.Code.invalid_operand, "relational operator requires numeric operands");
                 return null;
+            }
+            // Vector comparisons return vec<N, bool>
+            if (left_type == .vector) {
+                const bvec = v.allocator.create(Types.Vector) catch return Types.Bool;
+                bvec.* = .{ .width = left_type.vector.width, .element = Types.scalar_bool_ptr };
+                return .{ .vector = bvec };
             }
             return Types.Bool;
         },
@@ -902,8 +959,9 @@ fn checkBinary(v: *Validator, e: *Ast.BinaryExpr) ?Types.Type {
             return null;
         },
         .mod => {
-            if (!Types.isInteger(left_type) or !Types.isInteger(right_type)) {
-                v.addErrorWithCode(0, Diagnostic.Code.invalid_operand, "modulo operator requires integer operands");
+            // WGSL % works on both integers and floats (unlike C where fmod is separate).
+            if (!Types.isNumeric(left_type) or !Types.isNumeric(right_type)) {
+                v.addErrorWithCode(0, Diagnostic.Code.invalid_operand, "modulo operator requires numeric operands");
                 return null;
             }
             return Types.commonType(left_type, right_type);
@@ -1008,11 +1066,6 @@ fn checkCallExpr(v: *Validator, e: *Ast.CallExpr) ?Types.Type {
         }
     }
 
-    // Check argument types
-    for (e.args.items) |arg| {
-        _ = v.checkExpr(arg);
-    }
-
     // Check if it's a builtin function
     if (Builtins.lookup(callee_name)) |builtin| {
         // Check argument count
@@ -1022,7 +1075,7 @@ fn checkCallExpr(v: *Validator, e: *Ast.CallExpr) ?Types.Type {
             return null;
         }
 
-        // Collect argument types
+        // Collect argument types (single pass — no double evaluation)
         var arg_types: [8]?Types.Type = .{null} ** 8;
         const max_check = @min(e.args.items.len, 8);
         for (0..max_check) |i| {
@@ -1032,10 +1085,9 @@ fn checkCallExpr(v: *Validator, e: *Ast.CallExpr) ?Types.Type {
         // Type check arguments based on builtin kind
         switch (builtin.kind) {
             .numeric, .derivative => {
-                // Numeric and derivative builtins require numeric arguments
                 for (0..max_check) |i| {
                     if (arg_types[i]) |at| {
-                        if (!Types.isNumeric(at) and !Types.isFloat(at)) {
+                        if (!Types.isNumeric(at) and !Types.isFloat(at) and !Types.isMatrix(at)) {
                             v.addErrorWithCode(0, Diagnostic.Code.invalid_arg_type, "builtin requires numeric argument");
                             return null;
                         }
@@ -1043,18 +1095,25 @@ fn checkCallExpr(v: *Validator, e: *Ast.CallExpr) ?Types.Type {
                 }
             },
             .logical => {
-                // Logical builtins (all, any) require bool args
-                if (arg_types[0]) |at| {
-                    if (!at.eql(Types.Bool) and !Types.isVector(at)) {
-                        v.addErrorWithCode(0, Diagnostic.Code.invalid_arg_type, "builtin requires bool argument");
-                        return null;
+                // all/any require bool args; select has (T, T, bool) signature
+                if (!std.mem.eql(u8, callee_name, "select")) {
+                    if (arg_types[0]) |at| {
+                        if (!at.eql(Types.Bool) and !Types.isVector(at)) {
+                            v.addErrorWithCode(0, Diagnostic.Code.invalid_arg_type, "builtin requires bool argument");
+                            return null;
+                        }
                     }
                 }
             },
             else => {},
         }
 
-        return v.inferBuiltinReturnType(callee_name, e);
+        return v.inferBuiltinReturnType(builtin, callee_name, arg_types);
+    }
+
+    // For non-builtin calls, validate all argument expressions
+    for (e.args.items) |arg| {
+        _ = v.checkExpr(arg);
     }
 
     // Check if it's a type constructor
@@ -1124,101 +1183,166 @@ fn checkCallExpr(v: *Validator, e: *Ast.CallExpr) ?Types.Type {
     return null;
 }
 
-fn inferBuiltinReturnType(v: *Validator, name: []const u8, e: *Ast.CallExpr) ?Types.Type {
-    _ = v;
-    _ = e;
+fn inferBuiltinReturnType(v: *Validator, builtin: Builtins.Builtin, name: []const u8, arg_types: [8]?Types.Type) ?Types.Type {
+    return switch (builtin.return_pattern) {
+        .same_as_arg => arg_types[0],
+        .bool_scalar => Types.Bool,
+        .scalar_of_arg => if (arg_types[0]) |at| Types.scalarOf(at) else null,
+        .void_type => Types.Void,
+        .pack_u32 => Types.U32,
+        .u32_scalar => Types.U32,
+        .texture => v.inferTextureReturnType(name, arg_types),
+        .texture_dims => v.inferTextureDimsType(arg_types),
+        .custom => v.inferCustomBuiltin(name, arg_types),
+    };
+}
 
-    // Texture sampling functions return vec4<f32>
-    if (std.mem.startsWith(u8, name, "textureSample")) {
-        return .{ .vector = &texture_sample_return_vec };
-    }
-    // textureLoad returns vec4<T> where T depends on texture type
-    if (std.mem.eql(u8, name, "textureLoad")) {
-        return .{ .vector = &texture_sample_return_vec };
-    }
-    // textureDimensions returns u32 or vec2<u32> or vec3<u32>
-    if (std.mem.eql(u8, name, "textureDimensions")) {
-        return Types.U32;
-    }
-    // textureNumLayers, textureNumLevels, textureNumSamples return u32
-    if (std.mem.startsWith(u8, name, "textureNum")) {
-        return Types.U32;
-    }
-    // Atomic operations return the element type
-    if (std.mem.startsWith(u8, name, "atomic")) {
-        // Simplified — return u32 by default
-        return Types.U32;
-    }
-    // arrayLength returns u32
-    if (std.mem.eql(u8, name, "arrayLength")) {
-        return Types.U32;
-    }
-    // Boolean builtins
-    if (std.mem.eql(u8, name, "all") or std.mem.eql(u8, name, "any")) {
-        return Types.Bool;
-    }
-    // Barrier builtins return void
-    if (std.mem.eql(u8, name, "workgroupBarrier") or
-        std.mem.eql(u8, name, "storageBarrier") or
-        std.mem.eql(u8, name, "textureBarrier"))
+fn inferTextureReturnType(v: *Validator, name: []const u8, arg_types: [8]?Types.Type) ?Types.Type {
+    // Comparison sampling always returns f32
+    if (std.mem.eql(u8, name, "textureSampleCompare") or
+        std.mem.eql(u8, name, "textureSampleCompareLevel"))
     {
-        return Types.Void;
-    }
-    // Pack/unpack
-    if (std.mem.startsWith(u8, name, "pack")) {
-        return Types.U32;
-    }
-    if (std.mem.startsWith(u8, name, "unpack")) {
-        return .{ .vector = &texture_sample_return_vec }; // vec4<f32> or vec2<f32>
-    }
-    // Subgroup builtins — various return types
-    if (std.mem.startsWith(u8, name, "subgroup")) {
-        return null; // TODO: proper return type inference
+        return Types.F32;
     }
 
-    // For numeric builtins (sin, cos, etc.), return type matches first argument
-    // TODO: implement proper overload resolution
+    const tex_type = arg_types[0] orelse return .{ .vector = &vec4_f32_singleton };
+
+    switch (tex_type) {
+        .texture => |t| {
+            // Depth textures
+            if (t.kind == .depth or t.kind == .depth_multisampled) {
+                // textureGather/GatherCompare on depth return vec4<f32>
+                if (std.mem.eql(u8, name, "textureGather") or
+                    std.mem.eql(u8, name, "textureGatherCompare"))
+                {
+                    return .{ .vector = &vec4_f32_singleton };
+                }
+                // textureLoad, textureSample on depth return f32
+                return Types.F32;
+            }
+
+            // Get element scalar from sampled_type or texel_format
+            var elem_scalar: *const Types.Scalar = Types.scalar_f32_ptr;
+            if (t.sampled_type) |st| {
+                elem_scalar = st;
+            } else if (t.texel_format.len > 0) {
+                elem_scalar = Types.texelFormatToScalar(t.texel_format);
+            }
+
+            // Return vec4<element>
+            if (elem_scalar == Types.scalar_f32_ptr) {
+                return .{ .vector = &vec4_f32_singleton };
+            }
+            const result = v.allocator.create(Types.Vector) catch return null;
+            result.* = .{ .width = 4, .element = elem_scalar };
+            return .{ .vector = result };
+        },
+        else => return .{ .vector = &vec4_f32_singleton },
+    }
+}
+
+fn inferTextureDimsType(v: *Validator, arg_types: [8]?Types.Type) ?Types.Type {
+    const tex_type = arg_types[0] orelse return Types.U32;
+
+    if (tex_type != .texture) return Types.U32;
+    const t = tex_type.texture;
+
+    const width: u8 = switch (t.dimension) {
+        .@"1d" => 1,
+        .@"2d", .@"2d_array", .cube, .cube_array => 2,
+        .@"3d" => 3,
+    };
+
+    if (width == 1) return Types.U32;
+
+    const result = v.allocator.create(Types.Vector) catch return null;
+    result.* = .{ .width = width, .element = Types.scalar_u32_ptr };
+    return .{ .vector = result };
+}
+
+fn inferCustomBuiltin(v: *Validator, name: []const u8, arg_types: [8]?Types.Type) ?Types.Type {
+    // transpose: swap cols/rows
+    if (std.mem.eql(u8, name, "transpose")) {
+        if (arg_types[0]) |at| {
+            if (at == .matrix) {
+                const m = at.matrix;
+                const result = v.allocator.create(Types.Matrix) catch return null;
+                result.* = .{ .cols = m.rows, .rows = m.cols, .element = m.element };
+                return .{ .matrix = result };
+            }
+        }
+        return null;
+    }
+
+    // workgroupUniformLoad: returns element type of pointer arg
+    if (std.mem.eql(u8, name, "workgroupUniformLoad")) {
+        if (arg_types[0]) |at| {
+            if (at == .pointer) return at.pointer.element;
+        }
+        return null;
+    }
+
+    // subgroupBallot: returns vec4<u32>
+    if (std.mem.eql(u8, name, "subgroupBallot")) {
+        return .{ .vector = &vec4_u32_singleton };
+    }
+
+    // atomicCompareExchangeWeak returns a struct — simplified to null
+    if (std.mem.eql(u8, name, "atomicCompareExchangeWeak")) {
+        return null;
+    }
+
+    // Atomic ops: extract element type from atomic pointer
+    if (std.mem.startsWith(u8, name, "atomic")) {
+        if (arg_types[0]) |at| {
+            if (at == .pointer) {
+                if (at.pointer.element == .atomic) {
+                    return .{ .scalar = at.pointer.element.atomic.element };
+                }
+            }
+        }
+        return Types.U32; // fallback
+    }
+
+    // Unpack functions
+    if (std.mem.startsWith(u8, name, "unpack")) {
+        if (std.mem.eql(u8, name, "unpack4xI8")) return .{ .vector = &vec4_i32_singleton };
+        if (std.mem.eql(u8, name, "unpack4xU8")) return .{ .vector = &vec4_u32_singleton };
+        if (std.mem.startsWith(u8, name, "unpack2x16")) return .{ .vector = &vec2_f32_singleton };
+        // unpack4x8snorm, unpack4x8unorm → vec4<f32>
+        return .{ .vector = &vec4_f32_singleton };
+    }
+
+    // bitcast: return type from template (handled by template_type check before reaching here)
+    // frexp/modf: return structs — simplified to null
     return null;
 }
 
-// Singleton for texture sample return type (vec4<f32>)
-const texture_sample_return_vec = Types.Vector{
-    .width = 4,
-    .element = Types.scalar_f32_ptr,
-};
+// Singleton vectors for common return types
+const vec4_f32_singleton = Types.Vector{ .width = 4, .element = Types.scalar_f32_ptr };
+const vec4_u32_singleton = Types.Vector{ .width = 4, .element = Types.scalar_u32_ptr };
+const vec4_i32_singleton = Types.Vector{ .width = 4, .element = Types.scalar_i32_ptr };
+const vec2_f32_singleton = Types.Vector{ .width = 2, .element = Types.scalar_f32_ptr };
 
 fn checkTypeConstructor(v: *Validator, e: *Ast.CallExpr, t: Types.Type) ?Types.Type {
+    // Args are already validated by the caller's loop (checkCallExpr line ~1056).
+    // Only check arg counts here — no re-evaluation of arg expressions.
     const arg_count = e.args.items.len;
+    _ = v;
 
+    // WGSL allows zero-value constructors for all types (f32() → 0.0, etc.)
+    // and multiple overloads (splat, component-wise, from-columns for matrices).
+    // Only reject obviously wrong arg counts where no valid overload exists.
     switch (t) {
         .scalar => {
-            if (arg_count != 1) {
-                v.addErrorWithCode(0, Diagnostic.Code.invalid_arg_count, "scalar constructor expects 1 argument");
-                return null;
-            }
-            return t;
-        },
-        .vector => {
-            // Vector constructors can take various forms — simplified
-            return t;
-        },
-        .matrix => {
-            // Matrix constructors can take columns or scalars
-            return t;
+            if (arg_count > 1) return null;
         },
         .@"struct" => |st| {
-            if (arg_count != st.fields.len) {
-                v.addErrorWithCode(0, Diagnostic.Code.invalid_arg_count, "struct constructor argument count mismatch");
-                return null;
-            }
-            return t;
+            if (arg_count != 0 and arg_count != st.fields.len) return null;
         },
-        .array => {
-            // Array constructors
-            return t;
-        },
-        else => return t,
+        else => {},
     }
+    return t;
 }
 
 fn checkIndex(v: *Validator, e: *Ast.IndexExpr) ?Types.Type {
@@ -1833,6 +1957,36 @@ fn lookupType(v: *Validator, name: []const u8) ?Types.Type {
     // Matrix shorthand (mat2x2f, mat3x3f, etc.) and bare constructors (mat2x2, mat3x3, etc.)
     if (name.len >= 5 and std.mem.startsWith(u8, name, "mat")) {
         return v.parseMatrixShorthand(name);
+    }
+
+    // Depth texture types (no template args)
+    if (std.mem.startsWith(u8, name, "texture_depth")) {
+        const dim: Types.TextureDimension = if (std.mem.eql(u8, name, "texture_depth_2d"))
+            .@"2d"
+        else if (std.mem.eql(u8, name, "texture_depth_2d_array"))
+            .@"2d_array"
+        else if (std.mem.eql(u8, name, "texture_depth_cube"))
+            .cube
+        else if (std.mem.eql(u8, name, "texture_depth_cube_array"))
+            .cube_array
+        else if (std.mem.eql(u8, name, "texture_depth_multisampled_2d"))
+            .@"2d"
+        else
+            return null;
+        const kind: Types.TextureKind = if (std.mem.eql(u8, name, "texture_depth_multisampled_2d"))
+            .depth_multisampled
+        else
+            .depth;
+        const t = v.allocator.create(Types.Texture) catch return null;
+        t.* = .{ .kind = kind, .dimension = dim, .sampled_type = null, .texel_format = "", .access_mode = .read };
+        return .{ .texture = t };
+    }
+
+    // External texture type
+    if (std.mem.eql(u8, name, "texture_external")) {
+        const t = v.allocator.create(Types.Texture) catch return null;
+        t.* = .{ .kind = .external, .dimension = .@"2d", .sampled_type = null, .texel_format = "", .access_mode = .read };
+        return .{ .texture = t };
     }
 
     // Bare array constructor

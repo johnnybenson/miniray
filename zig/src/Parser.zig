@@ -227,6 +227,20 @@ fn declareSymbol(self: *Parser, name: []const u8, kind: Ast.Symbol.Kind, flags: 
     return @enumFromInt(idx);
 }
 
+/// Creates a symbol without adding it to the scope lookup table.
+/// Used for struct members which should not shadow other identifiers.
+fn declareSymbolNoScope(self: *Parser, name: []const u8, kind: Ast.Symbol.Kind, flags: Ast.Symbol.Flags) !Ast.SymbolIndex {
+    const idx: u32 = @intCast(self.symbols.items.len);
+    try self.symbols.append(self.allocator, .{
+        .original_name = name,
+        .kind = kind,
+        .flags = flags,
+        .use_count = 0,
+        .loc = 0,
+    });
+    return @enumFromInt(idx);
+}
+
 fn lookupSymbol(self: *const Parser, name: []const u8) ?Ast.SymbolIndex {
     var scope_iter: ?*Ast.Scope = self.scope;
     while (scope_iter) |s| {
@@ -757,9 +771,8 @@ fn parseStructDecl(self: *Parser) !*Ast.StructDecl {
         const member_attrs = try self.parseAttributes();
         if (self.currentTag() != .ident) break;
         const text = self.currentText();
-        const loc = self.currentStart();
         self.advance();
-        const name = try self.declareSymbol(text, .member, .{}, loc);
+        const name = try self.declareSymbolNoScope(text, .member, .{});
         _ = self.expect(.colon);
         const typ = try self.parseType();
         try decl.members.append(self.allocator, .{ .attributes = member_attrs, .name = name, .typ = typ });

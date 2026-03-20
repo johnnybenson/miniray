@@ -785,6 +785,24 @@ pub fn isFloat(t: Type) bool {
     };
 }
 
+/// Returns the scalar element type of a composite type, or null.
+pub fn scalarOf(t: Type) ?Type {
+    return switch (t) {
+        .scalar => t,
+        .vector => |v| .{ .scalar = v.element },
+        .matrix => |m| .{ .scalar = m.element },
+        else => null,
+    };
+}
+
+/// Maps a WGSL texel format string to its scalar type.
+pub fn texelFormatToScalar(format: []const u8) *const Scalar {
+    if (format.len == 0) return scalar_f32_ptr;
+    if (std.mem.endsWith(u8, format, "uint")) return scalar_u32_ptr;
+    if (std.mem.endsWith(u8, format, "sint")) return scalar_i32_ptr;
+    return scalar_f32_ptr; // unorm, snorm, float formats
+}
+
 /// Returns the element type of composite types, or null.
 pub fn elementType(allocator: Allocator, t: Type) Allocator.Error!?Type {
     return switch (t) {
@@ -834,6 +852,14 @@ pub fn canConvertTo(src: Type, dst: Type) bool {
                 .{ .scalar = src_v.element },
                 .{ .scalar = dst_v.element },
             );
+        }
+    }
+
+    // Pointer compatibility: same address space and compatible element type.
+    if (src == .pointer and dst == .pointer) {
+        if (src.pointer.address_space == dst.pointer.address_space) {
+            return src.pointer.element.eql(dst.pointer.element) or
+                canConvertTo(src.pointer.element, dst.pointer.element);
         }
     }
 
@@ -949,6 +975,20 @@ pub fn addSubResultType(allocator: Allocator, left: Type, right: Type) Allocator
             if (commonScalarType(lv.element, rv.element)) |elem| {
                 return try vec(allocator, lv.width, elem);
             }
+        }
+    }
+
+    // Vector +/- Scalar (scalar broadcast)
+    if (left_conc == .vector and right_conc == .scalar) {
+        const v = left_conc.vector;
+        if (commonScalarType(v.element, right_conc.scalar)) |elem| {
+            return try vec(allocator, v.width, elem);
+        }
+    }
+    if (left_conc == .scalar and right_conc == .vector) {
+        const v = right_conc.vector;
+        if (commonScalarType(left_conc.scalar, v.element)) |elem| {
+            return try vec(allocator, v.width, elem);
         }
     }
 
@@ -1232,6 +1272,66 @@ test "type query functions" {
     try std.testing.expect(isFloat(F32));
     try std.testing.expect(isFloat(F16));
     try std.testing.expect(!isFloat(I32));
+}
+
+test "scalarOf extracts element type" {
+    const allocator = std.testing.allocator;
+
+    // Scalar returns itself.
+    try std.testing.expect(scalarOf(F32).?.eql(F32));
+    try std.testing.expect(scalarOf(I32).?.eql(I32));
+
+    // Vector returns its element scalar.
+    const v2f = try vec(allocator, 2, scalar_f32_ptr);
+    defer allocator.destroy(v2f.vector);
+    try std.testing.expect(scalarOf(v2f).?.eql(F32));
+
+    // Matrix returns its element scalar.
+    const m4x4 = try mat(allocator, 4, 4, scalar_f32_ptr);
+    defer allocator.destroy(m4x4.matrix);
+    try std.testing.expect(scalarOf(m4x4).?.eql(F32));
+
+    // Bool is a scalar, so scalarOf returns it as-is.
+    try std.testing.expect(scalarOf(Bool).?.eql(Bool));
+
+    // Non-composite, non-scalar types return null.
+    try std.testing.expect(scalarOf(Void) == null);
+}
+
+test "texelFormatToScalar maps formats correctly" {
+    // Float formats (unorm, snorm, float) → f32.
+    try std.testing.expectEqual(ScalarKind.f32, texelFormatToScalar("rgba8unorm").kind);
+    try std.testing.expectEqual(ScalarKind.f32, texelFormatToScalar("rgba8snorm").kind);
+    try std.testing.expectEqual(ScalarKind.f32, texelFormatToScalar("rgba16float").kind);
+    try std.testing.expectEqual(ScalarKind.f32, texelFormatToScalar("r32float").kind);
+
+    // Unsigned integer formats → u32.
+    try std.testing.expectEqual(ScalarKind.u32, texelFormatToScalar("rgba8uint").kind);
+    try std.testing.expectEqual(ScalarKind.u32, texelFormatToScalar("rgba32uint").kind);
+
+    // Signed integer formats → i32.
+    try std.testing.expectEqual(ScalarKind.i32, texelFormatToScalar("rgba8sint").kind);
+    try std.testing.expectEqual(ScalarKind.i32, texelFormatToScalar("r32sint").kind);
+
+    // Empty format defaults to f32.
+    try std.testing.expectEqual(ScalarKind.f32, texelFormatToScalar("").kind);
+}
+
+test "canConvertTo pointer compatibility" {
+    const allocator = std.testing.allocator;
+
+    // Same pointer type is compatible.
+    const p1 = try ptr(allocator, .function, F32, .read_write);
+    defer allocator.destroy(p1.pointer);
+    const p2 = try ptr(allocator, .function, F32, .read);
+    defer allocator.destroy(p2.pointer);
+
+    try std.testing.expect(canConvertTo(p1, p2));
+
+    // Different address space is not compatible.
+    const p3 = try ptr(allocator, .storage, F32, .read);
+    defer allocator.destroy(p3.pointer);
+    try std.testing.expect(!canConvertTo(p1, p3));
 }
 
 test "sampler type" {
