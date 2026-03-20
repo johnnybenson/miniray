@@ -191,7 +191,10 @@ test "tint semantic preservation" {
 
         const outcome = testOneShader(alloc, source_bytes, rel_path, &failed_files, gpa_alloc);
         switch (outcome) {
-            .passed => passed += 1,
+            .passed => {
+                passed += 1;
+                gpa_alloc.free(rel_path);
+            },
             .failed => failed += 1,
             .skipped => {
                 skipped += 1;
