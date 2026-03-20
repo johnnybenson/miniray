@@ -1821,14 +1821,21 @@ fn lookupType(v: *Validator, name: []const u8) ?Types.Type {
         return .{ .sampler = s };
     }
 
-    // Vector shorthand (vec2f, vec3i, etc.)
+    // Vector shorthand (vec2f, vec3i, etc.) and bare constructors (vec2, vec3, vec4)
     if (name.len >= 4 and std.mem.startsWith(u8, name, "vec")) {
         return v.parseVectorShorthand(name);
     }
 
-    // Matrix shorthand (mat2x2f, mat3x3f, etc.)
-    if (name.len >= 6 and std.mem.startsWith(u8, name, "mat")) {
+    // Matrix shorthand (mat2x2f, mat3x3f, etc.) and bare constructors (mat2x2, mat3x3, etc.)
+    if (name.len >= 5 and std.mem.startsWith(u8, name, "mat")) {
         return v.parseMatrixShorthand(name);
+    }
+
+    // Bare array constructor
+    if (std.mem.eql(u8, name, "array")) {
+        const arr = v.allocator.create(Types.Array) catch return null;
+        arr.* = .{ .element = Types.F32, .count = 0 };
+        return .{ .array = arr };
     }
 
     // Check struct types

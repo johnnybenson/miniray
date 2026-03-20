@@ -62,9 +62,11 @@ pub fn encodeVlq(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator,
     }
 }
 
+pub const VlqSingleResult = struct { buf: [vlq_max_digits]u8, len: u8 };
+
 /// Encode a single VLQ value and return it as a short stack-allocated string slice.
-pub fn encodeVlqSingle(value: i32) struct { buf: [vlq_max_digits]u8, len: u8 } {
-    var result: struct { buf: [vlq_max_digits]u8, len: u8 } = .{ .buf = undefined, .len = 0 };
+pub fn encodeVlqSingle(value: i32) VlqSingleResult {
+    var result = VlqSingleResult{ .buf = undefined, .len = 0 };
 
     var vlq: u32 = if (value < 0)
         (@as(u32, @intCast(-value)) << 1) | vlq_sign_bit
@@ -903,4 +905,969 @@ test "decodeMappings round-trip" {
     try std.testing.expectEqual(@as(u32, 0), decoded.items[0].gen_col);
     try std.testing.expectEqual(@as(u32, 0), decoded.items[0].src_line);
     try std.testing.expectEqual(@as(u32, 0), decoded.items[0].src_col);
+}
+
+// =========================================================================
+// Additional VLQ tests
+// =========================================================================
+
+test "VLQ large values" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    // Large positive
+    encodeVlq(&buf, std.testing.allocator, 100000);
+    const d1 = decodeVlq(buf.items);
+    try std.testing.expect(d1 != null);
+    try std.testing.expectEqual(@as(i32, 100000), d1.?.value);
+
+    // Large negative
+    buf.clearRetainingCapacity();
+    encodeVlq(&buf, std.testing.allocator, -100000);
+    const d2 = decodeVlq(buf.items);
+    try std.testing.expect(d2 != null);
+    try std.testing.expectEqual(@as(i32, -100000), d2.?.value);
+}
+
+test "VLQ base64 alphabet covers 64 chars" {
+    try std.testing.expectEqual(@as(usize, 64), base64_alphabet.len);
+}
+
+test "VLQ fast path small positive via encode/decode" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    // Value 0 should encode to single char 'A'
+    encodeVlq(&buf, std.testing.allocator, 0);
+    try std.testing.expectEqual(@as(usize, 1), buf.items.len);
+    try std.testing.expectEqual(@as(u8, 'A'), buf.items[0]);
+}
+
+test "VLQ fast path small negative via encode/decode" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    encodeVlq(&buf, std.testing.allocator, -1);
+    try std.testing.expectEqual(@as(usize, 1), buf.items.len);
+    try std.testing.expectEqual(@as(u8, 'D'), buf.items[0]);
+}
+
+test "VLQ boundary value 15" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    encodeVlq(&buf, std.testing.allocator, 15);
+    try std.testing.expectEqual(@as(usize, 1), buf.items.len);
+}
+
+test "VLQ decode invalid high byte" {
+    const result = decodeVlq(&[_]u8{0xFF});
+    try std.testing.expect(result == null);
+}
+
+test "VLQ decode invalid base64 char" {
+    const result = decodeVlq(&[_]u8{'!'});
+    try std.testing.expect(result == null);
+}
+
+test "VLQ decode sequence" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    // Encode multiple values
+    encodeVlq(&buf, std.testing.allocator, 5);
+    encodeVlq(&buf, std.testing.allocator, -3);
+    encodeVlq(&buf, std.testing.allocator, 0);
+
+    // Decode sequentially
+    var offset: usize = 0;
+    const d1 = decodeVlq(buf.items[offset..]);
+    try std.testing.expect(d1 != null);
+    try std.testing.expectEqual(@as(i32, 5), d1.?.value);
+    offset += d1.?.consumed;
+
+    const d2 = decodeVlq(buf.items[offset..]);
+    try std.testing.expect(d2 != null);
+    try std.testing.expectEqual(@as(i32, -3), d2.?.value);
+    offset += d2.?.consumed;
+
+    const d3 = decodeVlq(buf.items[offset..]);
+    try std.testing.expect(d3 != null);
+    try std.testing.expectEqual(@as(i32, 0), d3.?.value);
+}
+
+// =========================================================================
+// Additional LineIndex / Position tests
+// =========================================================================
+
+test "LineIndex CRLF newlines" {
+    const allocator = std.testing.allocator;
+    const source = "line1\r\nline2\r\nline3";
+    const li = LineIndex.init(allocator, source);
+    defer @constCast(&li).line_starts.deinit(allocator);
+
+    // Should have 3 lines
+    try std.testing.expectEqual(@as(usize, 3), li.line_starts.items.len);
+}
+
+test "LineIndex CR-only newlines" {
+    const allocator = std.testing.allocator;
+    const source = "line1\rline2\rline3";
+    const li = LineIndex.init(allocator, source);
+    defer @constCast(&li).line_starts.deinit(allocator);
+
+    // Should have 3 lines
+    try std.testing.expectEqual(@as(usize, 3), li.line_starts.items.len);
+}
+
+test "LineIndex UTF-8 multibyte" {
+    const allocator = std.testing.allocator;
+    // "héllo" has a 2-byte character
+    const source = "h\xc3\xa9llo\nworld";
+    const li = LineIndex.init(allocator, source);
+    defer @constCast(&li).line_starts.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), li.line_starts.items.len);
+    // First line starts at 0, second at byte after \n
+    try std.testing.expectEqual(@as(u32, 0), li.line_starts.items[0]);
+}
+
+test "LineIndex byteOffsetToLineColumn out of bounds" {
+    const allocator = std.testing.allocator;
+    const source = "hello";
+    const li = LineIndex.init(allocator, source);
+    defer @constCast(&li).line_starts.deinit(allocator);
+
+    // Out of bounds offset should clamp
+    const pos = li.byteOffsetToLineColumn(1000);
+    // Should not crash, return something reasonable
+    _ = pos;
+}
+
+test "LineIndex many lines" {
+    const allocator = std.testing.allocator;
+    // Build a source with many lines
+    var buf: [1000]u8 = undefined;
+    var i: usize = 0;
+    var line_count: usize = 0;
+    while (i + 2 < buf.len) {
+        buf[i] = 'a';
+        buf[i + 1] = '\n';
+        i += 2;
+        line_count += 1;
+    }
+
+    const li = LineIndex.init(allocator, buf[0..i]);
+    defer @constCast(&li).line_starts.deinit(allocator);
+
+    try std.testing.expectEqual(line_count, li.line_starts.items.len);
+}
+
+test "LineIndex reverse lookup" {
+    const allocator = std.testing.allocator;
+    const source = "fn main() {\n  return;\n}";
+    const li = LineIndex.init(allocator, source);
+    defer @constCast(&li).line_starts.deinit(allocator);
+
+    // Byte offset 0 -> line 0, col 0
+    const pos0 = li.byteOffsetToLineColumn(0);
+    try std.testing.expectEqual(@as(u32, 0), pos0.line);
+    try std.testing.expectEqual(@as(u32, 0), pos0.col);
+
+    // Byte offset at start of "return" (14) -> line 1
+    const pos1 = li.byteOffsetToLineColumn(14);
+    try std.testing.expectEqual(@as(u32, 1), pos1.line);
+}
+
+// =========================================================================
+// Additional Generator / decodeMappings tests
+// =========================================================================
+
+test "Generator name deduplication" {
+    const allocator = std.testing.allocator;
+    const source = "fn foo() { let x = foo(); }";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.addMapping(0, 0, 0, "foo");
+    gen.addMapping(0, 19, 19, "foo"); // same name again
+
+    const result = gen.generate();
+    // "foo" should appear only once in names array
+    try std.testing.expectEqual(@as(usize, 1), result.names.len);
+}
+
+test "Generator mapping without name" {
+    const allocator = std.testing.allocator;
+    const source = "fn foo() {}";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.addMapping(0, 0, 0, "");
+    gen.addMapping(0, 3, 3, "");
+
+    const result = gen.generate();
+    // No names when all mappings have empty name
+    try std.testing.expectEqual(@as(usize, 0), result.names.len);
+}
+
+test "Generator empty source" {
+    const allocator = std.testing.allocator;
+    var gen = Generator.init(allocator, "");
+    defer gen.deinit();
+
+    const result = gen.generate();
+    try std.testing.expectEqual(@as(u32, 3), result.version);
+}
+
+test "Generator file and sources content" {
+    const allocator = std.testing.allocator;
+    const source = "fn foo() {}";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setFile("shader.min.wgsl");
+    gen.setSourceName("shader.wgsl");
+    gen.setIncludeSource(true);
+
+    const result = gen.generate();
+    try std.testing.expectEqualStrings("shader.min.wgsl", result.file);
+    try std.testing.expect(result.sources.len > 0);
+    try std.testing.expect(result.sources_content.len > 0);
+}
+
+test "decodeMappings empty" {
+    const decoded = decodeMappings(std.testing.allocator, "");
+    defer @constCast(&decoded).deinit();
+    try std.testing.expectEqual(@as(usize, 0), decoded.items.len);
+}
+
+test "decodeMappings semicolons produce line breaks" {
+    const decoded = decodeMappings(std.testing.allocator, "AAAA;AACA");
+    defer @constCast(&decoded).deinit();
+    // Should have entries on different lines
+    try std.testing.expect(decoded.items.len >= 2);
+    if (decoded.items.len >= 2) {
+        try std.testing.expectEqual(@as(u32, 0), decoded.items[0].gen_line);
+        try std.testing.expectEqual(@as(u32, 1), decoded.items[1].gen_line);
+    }
+}
+
+test "decodeMappings with name index" {
+    // AAAA has 4 segments: gen_col=0, src_idx=0, src_line=0, src_col=0
+    // AAAAA has 5 segments: gen_col=0, src_idx=0, src_line=0, src_col=0, name_idx=0
+    const decoded = decodeMappings(std.testing.allocator, "AAAAA");
+    defer @constCast(&decoded).deinit();
+    try std.testing.expect(decoded.items.len >= 1);
+    try std.testing.expectEqual(@as(i32, 0), decoded.items[0].name_index);
+}
+
+// =========================================================================
+// VLQ encode known positive values (from Go TestVLQEncodePositive)
+// =========================================================================
+
+test "VLQ encode known positive values" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ @as(i32, 2), "E" },
+        .{ @as(i32, 3), "G" },
+        .{ @as(i32, 15), "e" },
+        .{ @as(i32, 16), "gB" },
+        .{ @as(i32, 31), "+B" },
+        .{ @as(i32, 32), "gC" },
+        .{ @as(i32, 100), "oG" },
+        .{ @as(i32, 1000), "w+B" },
+    };
+
+    inline for (cases) |c| {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        encodeVlq(&buf, allocator, c[0]);
+        try std.testing.expectEqualStrings(c[1], buf.items);
+    }
+}
+
+test "VLQ encode known negative values" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ @as(i32, -2), "F" },
+        .{ @as(i32, -15), "f" },
+        .{ @as(i32, -16), "hB" },
+        .{ @as(i32, -31), "/B" },
+        .{ @as(i32, -32), "hC" },
+        .{ @as(i32, -100), "pG" },
+        .{ @as(i32, -1000), "x+B" },
+    };
+
+    inline for (cases) |c| {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        encodeVlq(&buf, allocator, c[0]);
+        try std.testing.expectEqualStrings(c[1], buf.items);
+    }
+}
+
+// =========================================================================
+// VLQ fast path: values 0-15 produce single char, 16 needs two
+// =========================================================================
+
+test "VLQ fast path small positive all single char" {
+    const allocator = std.testing.allocator;
+    var v: i32 = 0;
+    while (v <= 15) : (v += 1) {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        encodeVlq(&buf, allocator, v);
+        try std.testing.expectEqual(@as(usize, 1), buf.items.len);
+    }
+}
+
+test "VLQ fast path small negative all single char" {
+    const allocator = std.testing.allocator;
+    var v: i32 = -1;
+    while (v >= -15) : (v -= 1) {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        encodeVlq(&buf, allocator, v);
+        try std.testing.expectEqual(@as(usize, 1), buf.items.len);
+    }
+}
+
+test "VLQ fast path boundary 16 needs two digits" {
+    const allocator = std.testing.allocator;
+    {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        encodeVlq(&buf, allocator, 16);
+        try std.testing.expectEqual(@as(usize, 2), buf.items.len);
+    }
+    {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        encodeVlq(&buf, allocator, -16);
+        try std.testing.expectEqual(@as(usize, 2), buf.items.len);
+    }
+}
+
+// =========================================================================
+// VLQ decode edge cases
+// =========================================================================
+
+test "VLQ decode multiple invalid base64 chars" {
+    const invalid = [_][]const u8{ "@", "#", "$", "%", "^", "&", "*", "(", ")", "-", "_" };
+    for (invalid) |ch| {
+        try std.testing.expect(decodeVlq(ch) == null);
+    }
+}
+
+test "VLQ decode truncated continuation" {
+    // 'g' is index 32, which has the continuation bit set. Alone it is truncated.
+    try std.testing.expect(decodeVlq("g") == null);
+}
+
+// =========================================================================
+// LineIndex detailed multi-line positions (from Go TestLineIndexMultiLine)
+// =========================================================================
+
+test "LineIndex multi-line detailed positions" {
+    const allocator = std.testing.allocator;
+    const source = "const x = 1;\nconst y = 2;\nconst z = 3;";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 3), li.lineCount());
+
+    // Line 0
+    {
+        const p = li.byteOffsetToLineColumn(0);
+        try std.testing.expectEqual(@as(u32, 0), p.line);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    {
+        const p = li.byteOffsetToLineColumn(6);
+        try std.testing.expectEqual(@as(u32, 0), p.line);
+        try std.testing.expectEqual(@as(u32, 6), p.col);
+    }
+    {
+        const p = li.byteOffsetToLineColumn(12);
+        try std.testing.expectEqual(@as(u32, 0), p.line);
+        try std.testing.expectEqual(@as(u32, 12), p.col);
+    }
+    // Line 1 (starts at byte 13 after \n)
+    {
+        const p = li.byteOffsetToLineColumn(13);
+        try std.testing.expectEqual(@as(u32, 1), p.line);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    {
+        const p = li.byteOffsetToLineColumn(19);
+        try std.testing.expectEqual(@as(u32, 1), p.line);
+        try std.testing.expectEqual(@as(u32, 6), p.col);
+    }
+    // Line 2 (starts at byte 26)
+    {
+        const p = li.byteOffsetToLineColumn(26);
+        try std.testing.expectEqual(@as(u32, 2), p.line);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    {
+        const p = li.byteOffsetToLineColumn(32);
+        try std.testing.expectEqual(@as(u32, 2), p.line);
+        try std.testing.expectEqual(@as(u32, 6), p.col);
+    }
+}
+
+// =========================================================================
+// LineIndex CRLF detailed positions (from Go TestLineIndexCRLFPositions)
+// =========================================================================
+
+test "LineIndex CRLF detailed positions" {
+    const allocator = std.testing.allocator;
+    // "ab\r\ncd\r\nef"
+    const source = "ab\r\ncd\r\nef";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 3), li.lineCount());
+
+    // 'a' at byte 0 -> line 0, col 0
+    {
+        const p = li.byteOffsetToLineColumn(0);
+        try std.testing.expectEqual(@as(u32, 0), p.line);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    // 'b' at byte 1 -> line 0, col 1
+    {
+        const p = li.byteOffsetToLineColumn(1);
+        try std.testing.expectEqual(@as(u32, 0), p.line);
+        try std.testing.expectEqual(@as(u32, 1), p.col);
+    }
+    // 'c' at byte 4 -> line 1, col 0
+    {
+        const p = li.byteOffsetToLineColumn(4);
+        try std.testing.expectEqual(@as(u32, 1), p.line);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    // 'd' at byte 5 -> line 1, col 1
+    {
+        const p = li.byteOffsetToLineColumn(5);
+        try std.testing.expectEqual(@as(u32, 1), p.line);
+        try std.testing.expectEqual(@as(u32, 1), p.col);
+    }
+    // 'e' at byte 8 -> line 2, col 0
+    {
+        const p = li.byteOffsetToLineColumn(8);
+        try std.testing.expectEqual(@as(u32, 2), p.line);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+}
+
+// =========================================================================
+// LineIndex UTF-16 emoji/multibyte tests (from Go position_test.go)
+// =========================================================================
+
+test "LineIndex UTF-16 emoji column" {
+    const allocator = std.testing.allocator;
+    // "a😀b" - 😀 is 4 UTF-8 bytes, 2 UTF-16 code units
+    const source = "a\xf0\x9f\x98\x80b";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    // 'a' at byte 0 -> UTF-16 col 0
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 0);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    // 😀 at byte 1 -> UTF-16 col 1
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 1);
+        try std.testing.expectEqual(@as(u32, 1), p.col);
+    }
+    // 'b' at byte 5 -> UTF-16 col 3 (1 for 'a' + 2 for 😀)
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 5);
+        try std.testing.expectEqual(@as(u32, 3), p.col);
+    }
+}
+
+test "LineIndex UTF-16 multiple emojis" {
+    const allocator = std.testing.allocator;
+    // "a👍👎b" - each emoji is 4 UTF-8 bytes, 2 UTF-16 code units
+    const source = "a\xf0\x9f\x91\x8d\xf0\x9f\x91\x8eb";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    // 'a' at byte 0 -> col 0
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 0);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    // 👍 at byte 1 -> col 1
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 1);
+        try std.testing.expectEqual(@as(u32, 1), p.col);
+    }
+    // 👎 at byte 5 -> col 3
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 5);
+        try std.testing.expectEqual(@as(u32, 3), p.col);
+    }
+    // 'b' at byte 9 -> col 5
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 9);
+        try std.testing.expectEqual(@as(u32, 5), p.col);
+    }
+}
+
+test "LineIndex UTF-16 mixed BMP content" {
+    const allocator = std.testing.allocator;
+    // "café" - 'é' is 2 UTF-8 bytes but 1 UTF-16 code unit (BMP)
+    const source = "caf\xc3\xa9";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    // 'c' byte 0 -> col 0
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 0);
+        try std.testing.expectEqual(@as(u32, 0), p.col);
+    }
+    // 'a' byte 1 -> col 1
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 1);
+        try std.testing.expectEqual(@as(u32, 1), p.col);
+    }
+    // 'f' byte 2 -> col 2
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 2);
+        try std.testing.expectEqual(@as(u32, 2), p.col);
+    }
+    // 'é' byte 3 -> col 3
+    {
+        const p = li.byteOffsetToLineColumnUtf16(source, 3);
+        try std.testing.expectEqual(@as(u32, 3), p.col);
+    }
+}
+
+test "LineIndex UTF-16 clamp out of bounds" {
+    const allocator = std.testing.allocator;
+    const source = "abc";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    const pos = li.byteOffsetToLineColumnUtf16(source, 100);
+    try std.testing.expectEqual(@as(u32, 0), pos.line);
+    try std.testing.expectEqual(@as(u32, 3), pos.col);
+}
+
+test "LineIndex UTF-16 empty source" {
+    const allocator = std.testing.allocator;
+    const source = "";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    const pos = li.byteOffsetToLineColumnUtf16(source, 0);
+    try std.testing.expectEqual(@as(u32, 0), pos.line);
+    try std.testing.expectEqual(@as(u32, 0), pos.col);
+}
+
+// =========================================================================
+// LineIndex lineColumnToByteOffset (from Go TestLineColumnToByteOffset*)
+// =========================================================================
+
+test "LineIndex lineColumnToByteOffset basic" {
+    const allocator = std.testing.allocator;
+    const source = "const x = 1;\nconst y = 2;\n";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), li.lineColumnToByteOffset(@intCast(source.len), 0, 0));
+    try std.testing.expectEqual(@as(u32, 6), li.lineColumnToByteOffset(@intCast(source.len), 0, 6));
+    try std.testing.expectEqual(@as(u32, 13), li.lineColumnToByteOffset(@intCast(source.len), 1, 0));
+    try std.testing.expectEqual(@as(u32, 19), li.lineColumnToByteOffset(@intCast(source.len), 1, 6));
+}
+
+test "LineIndex lineColumnToByteOffset line out of bounds clamp" {
+    const allocator = std.testing.allocator;
+    const source = "abc\ndef\n";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    // Line 100 should clamp to last line (line 1 starts at byte 4)
+    const offset = li.lineColumnToByteOffset(@intCast(source.len), 100, 0);
+    try std.testing.expectEqual(@as(u32, 4), offset);
+}
+
+test "LineIndex lineColumnToByteOffset column out of bounds clamp" {
+    const allocator = std.testing.allocator;
+    const source = "abc";
+    var li = LineIndex.init(allocator, source);
+    defer li.deinit(allocator);
+
+    // Column 100 should clamp to source length
+    const offset = li.lineColumnToByteOffset(@intCast(source.len), 0, 100);
+    try std.testing.expectEqual(@as(u32, 3), offset);
+}
+
+// =========================================================================
+// Generator single mapping with decode verification
+// (from Go TestSourceMapSingleMapping)
+// =========================================================================
+
+test "Generator single mapping decode verification" {
+    const allocator = std.testing.allocator;
+    const source = "const x = 1;";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.addMapping(0, 6, 6, "x");
+
+    const result = gen.generate();
+    try std.testing.expectEqual(@as(usize, 1), result.names.len);
+    try std.testing.expectEqualStrings("x", result.names[0]);
+    try std.testing.expect(result.mappings.len > 0);
+
+    var decoded = decodeMappings(allocator, result.mappings);
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.items.len);
+
+    const m = decoded.items[0];
+    try std.testing.expectEqual(@as(u32, 0), m.gen_line);
+    try std.testing.expectEqual(@as(u32, 6), m.gen_col);
+    try std.testing.expectEqual(@as(u32, 0), m.src_line);
+    try std.testing.expectEqual(@as(u32, 6), m.src_col);
+    try std.testing.expect(m.has_name);
+    try std.testing.expectEqual(@as(i32, 0), m.name_index);
+}
+
+// =========================================================================
+// Generator multiple mappings same line
+// (from Go TestSourceMapMultipleMappingsSameLine)
+// =========================================================================
+
+test "Generator multiple mappings same line" {
+    const allocator = std.testing.allocator;
+    const source = "const a = b + c;";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.addMapping(0, 6, 6, "a");
+    gen.addMapping(0, 10, 10, "b");
+    gen.addMapping(0, 14, 14, "c");
+
+    const result = gen.generate();
+    try std.testing.expectEqual(@as(usize, 3), result.names.len);
+
+    // Single line: should not contain semicolons, should contain commas
+    try std.testing.expect(std.mem.indexOf(u8, result.mappings, ";") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.mappings, ",") != null);
+}
+
+// =========================================================================
+// Generator multiple lines
+// (from Go TestSourceMapMultipleLines)
+// =========================================================================
+
+test "Generator multiple lines semicolons" {
+    const allocator = std.testing.allocator;
+    const source = "const a = 1;\nconst b = 2;\nconst c = 3;";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setCoverLinesWithoutMappings(false);
+
+    gen.addMapping(0, 0, 0, "");
+    gen.addMapping(1, 0, 13, "");
+    gen.addMapping(2, 0, 26, "");
+
+    const result = gen.generate();
+
+    // Count semicolons: 3 lines should have 2 semicolons
+    var semicolons: usize = 0;
+    for (result.mappings) |c| {
+        if (c == ';') semicolons += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), semicolons);
+}
+
+// =========================================================================
+// Generator delta encoding verification
+// (from Go TestSourceMapDeltaEncoding)
+// =========================================================================
+
+test "Generator delta encoding" {
+    const allocator = std.testing.allocator;
+    const source = "const abc = 1;\nconst def = 2;";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setCoverLinesWithoutMappings(false);
+
+    gen.addMapping(0, 6, 6, "abc");
+    gen.addMapping(1, 6, 21, "def");
+
+    const result = gen.generate();
+
+    var decoded = decodeMappings(allocator, result.mappings);
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.items.len);
+
+    // First mapping
+    try std.testing.expectEqual(@as(u32, 0), decoded.items[0].gen_line);
+    try std.testing.expectEqual(@as(u32, 6), decoded.items[0].gen_col);
+
+    // Second mapping
+    try std.testing.expectEqual(@as(u32, 1), decoded.items[1].gen_line);
+    try std.testing.expectEqual(@as(u32, 6), decoded.items[1].gen_col);
+}
+
+// =========================================================================
+// Generator mappings format verification
+// (from Go TestSourceMapMappingsFormat)
+// =========================================================================
+
+test "Generator mappings format" {
+    const allocator = std.testing.allocator;
+    const source = "a\nb\nc";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setCoverLinesWithoutMappings(false);
+
+    gen.addMapping(0, 0, 0, "");
+    gen.addMapping(1, 0, 2, "");
+    gen.addMapping(2, 0, 4, "");
+
+    const result = gen.generate();
+
+    // Should have format "segment;segment;segment" (3 parts)
+    var parts: usize = 1;
+    for (result.mappings) |c| {
+        if (c == ';') parts += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), parts);
+}
+
+// =========================================================================
+// Line coverage workaround tests
+// (from Go TestLineCoverageWorkaround, etc.)
+// =========================================================================
+
+test "Generator line coverage fills gap lines" {
+    const allocator = std.testing.allocator;
+    const source = "line1\nline2\nline3\n";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setSourceName("test.wgsl");
+
+    // Only add mapping on line 0 and line 2, skip line 1
+    gen.addMapping(0, 5, 0, "");
+    gen.addMapping(2, 5, 12, "");
+
+    const result = gen.generate();
+    var decoded = decodeMappings(allocator, result.mappings);
+    defer decoded.deinit();
+
+    // Line 1 should have a mapping at column 0 from the coverage workaround
+    var has_line1_col0 = false;
+    for (decoded.items) |m| {
+        if (m.gen_line == 1 and m.gen_col == 0) {
+            has_line1_col0 = true;
+        }
+    }
+    try std.testing.expect(has_line1_col0);
+}
+
+test "Generator line coverage not duplicated when line has col 0" {
+    const allocator = std.testing.allocator;
+    const source = "line1\nline2\n";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setSourceName("test.wgsl");
+
+    gen.addMapping(0, 0, 0, "");
+    gen.addMapping(1, 0, 6, ""); // Line 1 already has col 0
+
+    const result = gen.generate();
+    var decoded = decodeMappings(allocator, result.mappings);
+    defer decoded.deinit();
+
+    // Count mappings on line 1
+    var line1_count: usize = 0;
+    for (decoded.items) |m| {
+        if (m.gen_line == 1) line1_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), line1_count);
+}
+
+test "Generator line coverage multiple gaps" {
+    const allocator = std.testing.allocator;
+    const source = "a\nb\nc\nd\ne\n";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setSourceName("test.wgsl");
+
+    gen.addMapping(0, 0, 0, "");
+    gen.addMapping(4, 0, 8, ""); // skip lines 1, 2, 3
+
+    const result = gen.generate();
+    var decoded = decodeMappings(allocator, result.mappings);
+    defer decoded.deinit();
+
+    // All lines 0..4 should have at least one mapping
+    var covered: [5]bool = .{ false, false, false, false, false };
+    for (decoded.items) |m| {
+        if (m.gen_line < 5) covered[m.gen_line] = true;
+    }
+
+    var line: u32 = 0;
+    while (line <= 4) : (line += 1) {
+        try std.testing.expect(covered[line]);
+    }
+}
+
+test "Generator line coverage disabled" {
+    const allocator = std.testing.allocator;
+    const source = "line1\nline2\nline3\n";
+    var gen = Generator.init(allocator, source);
+    defer gen.deinit();
+
+    gen.setSourceName("test.wgsl");
+    gen.setCoverLinesWithoutMappings(false);
+
+    gen.addMapping(0, 5, 0, "");
+    gen.addMapping(2, 5, 12, "");
+
+    const result = gen.generate();
+    var decoded = decodeMappings(allocator, result.mappings);
+    defer decoded.deinit();
+
+    // Line 1 should NOT have a mapping
+    var has_line1 = false;
+    for (decoded.items) |m| {
+        if (m.gen_line == 1) has_line1 = true;
+    }
+    try std.testing.expect(!has_line1);
+}
+
+// =========================================================================
+// Result toComment (from Go TestToCommentInline / TestToCommentExternal)
+// =========================================================================
+
+test "Result toComment inline" {
+    const allocator = std.testing.allocator;
+    const result = Result{
+        .version = 3,
+        .file = "test.wgsl",
+        .mappings = "AAAA",
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    result.toComment(&buf, allocator, true);
+
+    try std.testing.expect(std.mem.startsWith(u8, buf.items, "//# sourceMappingURL=data:application/json;base64,"));
+}
+
+test "Result toComment external" {
+    const allocator = std.testing.allocator;
+    const result = Result{
+        .version = 3,
+        .file = "test.wgsl",
+        .mappings = "AAAA",
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    result.toComment(&buf, allocator, false);
+
+    try std.testing.expectEqualStrings("//# sourceMappingURL=test.wgsl.map", buf.items);
+}
+
+// =========================================================================
+// decodeMappings edge cases
+// (from Go TestDecodeMappings* edge case tests)
+// =========================================================================
+
+test "decodeMappings multiple segments same line" {
+    // "AAAA,CACA" = two segments on same line
+    var decoded = decodeMappings(std.testing.allocator, "AAAA,CACA");
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.items.len);
+    // First: col 0
+    try std.testing.expectEqual(@as(u32, 0), decoded.items[0].gen_col);
+    // Second: col 1 (delta of C=1)
+    try std.testing.expectEqual(@as(u32, 1), decoded.items[1].gen_col);
+}
+
+test "decodeMappings three lines" {
+    // "AAAA;CACA;EAEA" = one mapping per line
+    var decoded = decodeMappings(std.testing.allocator, "AAAA;CACA;EAEA");
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), decoded.items.len);
+    try std.testing.expectEqual(@as(u32, 0), decoded.items[0].gen_line);
+    try std.testing.expectEqual(@as(u32, 1), decoded.items[1].gen_line);
+    try std.testing.expectEqual(@as(u32, 2), decoded.items[2].gen_line);
+}
+
+test "decodeMappings empty segment skipped" {
+    // "AAAA,,CACA" - empty segment between commas
+    var decoded = decodeMappings(std.testing.allocator, "AAAA,,CACA");
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.items.len);
+}
+
+test "decodeMappings empty lines increment line counter" {
+    // "AAAA;;;CACA" - lines 1 and 2 are empty
+    var decoded = decodeMappings(std.testing.allocator, "AAAA;;;CACA");
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.items.len);
+    try std.testing.expectEqual(@as(u32, 0), decoded.items[0].gen_line);
+    try std.testing.expectEqual(@as(u32, 3), decoded.items[1].gen_line);
+}
+
+test "decodeMappings invalid VLQ segment skipped" {
+    // "g" has continuation bit set, alone it is invalid. Should be skipped.
+    // "AAAA" that follows should decode fine.
+    var decoded = decodeMappings(std.testing.allocator, "g,AAAA");
+    defer decoded.deinit();
+
+    // The 'g' segment should be skipped, AAAA should decode
+    try std.testing.expectEqual(@as(usize, 1), decoded.items.len);
+}
+
+test "decodeMappings segment with only column" {
+    // "C" is a single VLQ value (1), no source info
+    var decoded = decodeMappings(std.testing.allocator, "C");
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.items.len);
+    try std.testing.expectEqual(@as(u32, 1), decoded.items[0].gen_col);
+}
+
+// =========================================================================
+// utf8ToUtf16Column direct tests
+// =========================================================================
+
+test "utf8ToUtf16Column zero length" {
+    try std.testing.expectEqual(@as(u32, 0), utf8ToUtf16Column("abc", 0));
+}
+
+test "utf8ToUtf16Column beyond string" {
+    try std.testing.expectEqual(@as(u32, 3), utf8ToUtf16Column("abc", 100));
+}
+
+test "utf8ToUtf16Column invalid UTF-8" {
+    // \xff is not valid UTF-8, should be counted as 1 unit
+    const s = "a\xffb";
+    const col = utf8ToUtf16Column(s, 2);
+    try std.testing.expectEqual(@as(u32, 2), col);
 }

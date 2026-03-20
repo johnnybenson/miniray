@@ -473,8 +473,12 @@ fn scanNumber(self: *Lexer, start: u32) TokenResult {
             const next_is_digit = self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1]);
             const next_is_ident = self.pos + 1 < self.source.len and isIdentStart(self.source[self.pos + 1]);
             const at_end = self.pos + 1 >= self.source.len;
+            // Accept 1.f and 1.h — float suffix after decimal point with no fractional digits
+            const next_is_float_suffix = self.pos + 1 < self.source.len and
+                (self.source[self.pos + 1] == 'f' or self.source[self.pos + 1] == 'h') and
+                (self.pos + 2 >= self.source.len or !isIdentContinue(self.source[self.pos + 2]));
 
-            if (next_is_digit or at_end or !next_is_ident) {
+            if (next_is_digit or at_end or !next_is_ident or next_is_float_suffix) {
                 kind = .float_literal;
                 self.pos += 1;
                 while (self.pos < self.source.len and isDigit(self.source[self.pos])) self.pos += 1;
@@ -653,7 +657,10 @@ fn retokenizeEnd(self: *const Lexer, start: u32, tag: Tag, bound: u32) []const u
                 const nid = pos + 1 < src.len and isDigit(src[pos + 1]);
                 const nie = pos + 1 < src.len and isIdentStart(src[pos + 1]);
                 const ae = pos + 1 >= src.len;
-                if (nid or ae or !nie) {
+                const nfs = pos + 1 < src.len and
+                    (src[pos + 1] == 'f' or src[pos + 1] == 'h') and
+                    (pos + 2 >= src.len or !isIdentContinue(src[pos + 2]));
+                if (nid or ae or !nie or nfs) {
                     pos += 1;
                     while (pos < src.len and isDigit(src[pos])) pos += 1;
                 }
@@ -793,4 +800,703 @@ test "tokenize numbers" {
     try std.testing.expectEqual(Tag.float_literal, tags[4]); // 0.5f
     try std.testing.expectEqual(Tag.int_literal, tags[5]); // 1u
     try std.testing.expectEqual(Tag.int_literal, tags[6]); // 2i
+}
+
+// =========================================================================
+// Ported from Go internal/lexer/lexer_test.go
+// =========================================================================
+
+/// Tokenize `input`, assert the first token has the given tag, free memory.
+fn expectToken(input: [:0]const u8, expected: Tag) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tokens = try tokenize(arena.allocator(), input);
+    const tags = tokens.items(.tag);
+    try std.testing.expect(tags.len > 0);
+    try std.testing.expectEqual(expected, tags[0]);
+}
+
+/// Tokenize `input`, assert the first token has the given tag AND the given
+/// source text, free memory.
+fn expectTokenValue(input: [:0]const u8, expected_tag: Tag, expected_value: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tokens = try tokenize(arena.allocator(), input);
+    const tags = tokens.items(.tag);
+    const starts = tokens.items(.start);
+    try std.testing.expect(tags.len > 0);
+    try std.testing.expectEqual(expected_tag, tags[0]);
+    // Token text runs from starts[0] up to (but not including) the start of
+    // the next token.  The next token is always present because tokenize()
+    // appends at least an eof sentinel.
+    const tok_start = starts[0];
+    const raw_end: u32 = if (tags.len > 1) starts[1] else @as(u32, @intCast(input.len));
+    // Strip trailing whitespace that belongs to the gap between tokens.
+    var tok_end = raw_end;
+    while (tok_end > tok_start and
+        (input[tok_end - 1] == ' ' or
+        input[tok_end - 1] == '\n' or
+        input[tok_end - 1] == '\t' or
+        input[tok_end - 1] == '\r'))
+    {
+        tok_end -= 1;
+    }
+    const actual = input[tok_start..tok_end];
+    try std.testing.expectEqualStrings(expected_value, actual);
+}
+
+/// Tokenize `input` and assert that the full sequence of tags (including the
+/// trailing eof) matches `expected`.
+fn expectTokenSequence(input: [:0]const u8, expected: []const Tag) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tokens = try tokenize(arena.allocator(), input);
+    const tags = tokens.items(.tag);
+    try std.testing.expectEqual(expected.len, tags.len);
+    for (expected, 0..) |exp, i| {
+        try std.testing.expectEqual(exp, tags[i]);
+    }
+}
+
+/// Tokenize `input` and assert that the first token is an error.
+fn expectError(input: [:0]const u8) !void {
+    try expectToken(input, .@"error");
+}
+
+// -------------------------------------------------------------------------
+// Keyword tests
+// -------------------------------------------------------------------------
+
+test "lexer: keywords" {
+    try expectToken("alias", .keyword_alias);
+    try expectToken("break", .keyword_break);
+    try expectToken("case", .keyword_case);
+    try expectToken("const", .keyword_const);
+    try expectToken("const_assert", .keyword_const_assert);
+    try expectToken("continue", .keyword_continue);
+    try expectToken("continuing", .keyword_continuing);
+    try expectToken("default", .keyword_default);
+    try expectToken("diagnostic", .keyword_diagnostic);
+    try expectToken("discard", .keyword_discard);
+    try expectToken("else", .keyword_else);
+    try expectToken("enable", .keyword_enable);
+    try expectToken("fn", .keyword_fn);
+    try expectToken("for", .keyword_for);
+    try expectToken("if", .keyword_if);
+    try expectToken("let", .keyword_let);
+    try expectToken("loop", .keyword_loop);
+    try expectToken("override", .keyword_override);
+    try expectToken("requires", .keyword_requires);
+    try expectToken("return", .keyword_return);
+    try expectToken("struct", .keyword_struct);
+    try expectToken("switch", .keyword_switch);
+    try expectToken("var", .keyword_var);
+    try expectToken("while", .keyword_while);
+}
+
+// -------------------------------------------------------------------------
+// Boolean literal tests
+// -------------------------------------------------------------------------
+
+test "lexer: boolean literals" {
+    try expectToken("true", .true_literal);
+    try expectToken("false", .false_literal);
+}
+
+// -------------------------------------------------------------------------
+// Identifier tests
+// -------------------------------------------------------------------------
+
+test "lexer: identifiers" {
+    try expectTokenValue("foo", .ident, "foo");
+    try expectTokenValue("_bar", .ident, "_bar");
+    try expectTokenValue("camelCase", .ident, "camelCase");
+    try expectTokenValue("snake_case", .ident, "snake_case");
+    try expectTokenValue("UPPER_CASE", .ident, "UPPER_CASE");
+    try expectTokenValue("a1", .ident, "a1");
+    try expectTokenValue("vec3f", .ident, "vec3f");
+    try expectTokenValue("mat4x4f", .ident, "mat4x4f");
+    try expectTokenValue("i32", .ident, "i32");
+    try expectTokenValue("Position", .ident, "Position");
+}
+
+test "lexer: single underscore is underscore token" {
+    try expectToken("_", .underscore);
+}
+
+test "lexer: double underscore prefix is error" {
+    try expectError("__reserved");
+    try expectError("__foo");
+}
+
+test "lexer: reserved words produce errors" {
+    // Sample of WGSL reserved words (see reserved_words map)
+    try expectError("NULL");
+    try expectError("Self");
+    try expectError("abstract");
+    try expectError("async");
+    try expectError("await");
+    try expectError("class");
+    try expectError("enum");
+    try expectError("import");
+    try expectError("interface");
+    try expectError("module");
+    try expectError("namespace");
+    try expectError("new");
+    try expectError("null");
+    try expectError("public");
+    try expectError("static");
+    try expectError("super");
+    try expectError("this");
+    try expectError("throw");
+    try expectError("try");
+    try expectError("typeof");
+    try expectError("yield");
+}
+
+// -------------------------------------------------------------------------
+// Decimal integer literal tests
+// -------------------------------------------------------------------------
+
+test "lexer: decimal integers" {
+    try expectTokenValue("0", .int_literal, "0");
+    try expectTokenValue("1", .int_literal, "1");
+    try expectTokenValue("42", .int_literal, "42");
+    try expectTokenValue("123456789", .int_literal, "123456789");
+    try expectTokenValue("0i", .int_literal, "0i");
+    try expectTokenValue("42i", .int_literal, "42i");
+    try expectTokenValue("0u", .int_literal, "0u");
+    try expectTokenValue("42u", .int_literal, "42u");
+}
+
+test "lexer: leading zeros in integers" {
+    try expectTokenValue("00", .int_literal, "00");
+    try expectTokenValue("007", .int_literal, "007");
+}
+
+// -------------------------------------------------------------------------
+// Hex integer literal tests
+// -------------------------------------------------------------------------
+
+test "lexer: hex integers" {
+    try expectTokenValue("0x0", .int_literal, "0x0");
+    try expectTokenValue("0x1", .int_literal, "0x1");
+    try expectTokenValue("0xABCDEF", .int_literal, "0xABCDEF");
+    try expectTokenValue("0xabcdef", .int_literal, "0xabcdef");
+    try expectTokenValue("0X1234", .int_literal, "0X1234");
+    try expectTokenValue("0xFFi", .int_literal, "0xFFi");
+    try expectTokenValue("0xFFu", .int_literal, "0xFFu");
+    try expectTokenValue("0x0", .int_literal, "0x0");
+    try expectTokenValue("0X0", .int_literal, "0X0");
+}
+
+// -------------------------------------------------------------------------
+// Decimal float literal tests
+// -------------------------------------------------------------------------
+
+test "lexer: decimal floats" {
+    try expectTokenValue("0.0", .float_literal, "0.0");
+    try expectTokenValue("1.0", .float_literal, "1.0");
+    try expectTokenValue("3.14159", .float_literal, "3.14159");
+    try expectTokenValue(".5", .float_literal, ".5");
+    try expectTokenValue("0.", .float_literal, "0.");
+    try expectTokenValue("1e10", .float_literal, "1e10");
+    try expectTokenValue("1E10", .float_literal, "1E10");
+    try expectTokenValue("1e+10", .float_literal, "1e+10");
+    try expectTokenValue("1e-10", .float_literal, "1e-10");
+    try expectTokenValue("1.5e10", .float_literal, "1.5e10");
+    try expectTokenValue("0.5f", .float_literal, "0.5f");
+    try expectTokenValue("0.5h", .float_literal, "0.5h");
+    try expectTokenValue("1.0f", .float_literal, "1.0f");
+    try expectTokenValue("1f", .float_literal, "1f");
+    try expectTokenValue("1e0", .float_literal, "1e0");
+    try expectTokenValue("1E0", .float_literal, "1E0");
+}
+
+// -------------------------------------------------------------------------
+// Hex float literal tests
+// -------------------------------------------------------------------------
+
+test "lexer: hex floats" {
+    try expectTokenValue("0x1p0", .float_literal, "0x1p0");
+    try expectTokenValue("0x1.0p0", .float_literal, "0x1.0p0");
+    try expectTokenValue("0x1P10", .float_literal, "0x1P10");
+    try expectTokenValue("0x1.ABCp+10", .float_literal, "0x1.ABCp+10");
+    try expectTokenValue("0x1.0p-10", .float_literal, "0x1.0p-10");
+    try expectTokenValue("0x1p0f", .float_literal, "0x1p0f");
+    try expectTokenValue("0x1p0h", .float_literal, "0x1p0h");
+}
+
+// -------------------------------------------------------------------------
+// Single-character operator tests
+// -------------------------------------------------------------------------
+
+test "lexer: single-char operators" {
+    try expectToken("+", .plus);
+    try expectToken("-", .minus);
+    try expectToken("*", .star);
+    try expectToken("/", .slash);
+    try expectToken("%", .percent);
+    try expectToken("&", .amp);
+    try expectToken("|", .pipe);
+    try expectToken("^", .caret);
+    try expectToken("~", .tilde);
+    try expectToken("!", .bang);
+    try expectToken("<", .lt);
+    try expectToken(">", .gt);
+    try expectToken("=", .eq);
+    try expectToken(".", .dot);
+    try expectToken("@", .at);
+}
+
+test "lexer: single-char operators at end of input" {
+    // Operators with no following character should still be correctly identified
+    try expectToken("+", .plus);
+    try expectToken("-", .minus);
+    try expectToken("*", .star);
+    try expectToken("/", .slash);
+    try expectToken("%", .percent);
+    try expectToken("&", .amp);
+    try expectToken("|", .pipe);
+    try expectToken("^", .caret);
+    try expectToken("<", .lt);
+    try expectToken(">", .gt);
+    try expectToken("=", .eq);
+    try expectToken("!", .bang);
+}
+
+// -------------------------------------------------------------------------
+// Multi-character operator tests
+// -------------------------------------------------------------------------
+
+test "lexer: multi-char operators" {
+    try expectToken("++", .plus_plus);
+    try expectToken("--", .minus_minus);
+    try expectToken("&&", .amp_amp);
+    try expectToken("||", .pipe_pipe);
+    try expectToken("<<", .lt_lt);
+    try expectToken(">>", .gt_gt);
+    try expectToken("<=", .lt_eq);
+    try expectToken(">=", .gt_eq);
+    try expectToken("==", .eq_eq);
+    try expectToken("!=", .bang_eq);
+    try expectToken("->", .arrow);
+}
+
+// -------------------------------------------------------------------------
+// Assignment operator tests
+// -------------------------------------------------------------------------
+
+test "lexer: assignment operators" {
+    try expectToken("+=", .plus_eq);
+    try expectToken("-=", .minus_eq);
+    try expectToken("*=", .star_eq);
+    try expectToken("/=", .slash_eq);
+    try expectToken("%=", .percent_eq);
+    try expectToken("&=", .amp_eq);
+    try expectToken("|=", .pipe_eq);
+    try expectToken("^=", .caret_eq);
+    try expectToken("<<=", .lt_lt_eq);
+    try expectToken(">>=", .gt_gt_eq);
+}
+
+// -------------------------------------------------------------------------
+// Delimiter tests
+// -------------------------------------------------------------------------
+
+test "lexer: delimiters" {
+    try expectToken("(", .l_paren);
+    try expectToken(")", .r_paren);
+    try expectToken("{", .l_brace);
+    try expectToken("}", .r_brace);
+    try expectToken("[", .l_bracket);
+    try expectToken("]", .r_bracket);
+    try expectToken(";", .semicolon);
+    try expectToken(":", .colon);
+    try expectToken(",", .comma);
+}
+
+// -------------------------------------------------------------------------
+// Comment tests
+// -------------------------------------------------------------------------
+
+test "lexer: line comment skipped" {
+    // The token after a line comment is what we see first
+    try expectToken("// comment\nfoo", .ident);
+    try expectTokenValue("// comment\nbar", .ident, "bar");
+}
+
+test "lexer: line comment at end of file produces eof" {
+    try expectTokenSequence("foo // comment", &.{ .ident, .eof });
+}
+
+test "lexer: block comment skipped" {
+    try expectToken("/* comment */ foo", .ident);
+    try expectTokenValue("/* comment */ bar", .ident, "bar");
+}
+
+test "lexer: multi-line block comment skipped" {
+    try expectTokenValue("/* line1\nline2\nline3 */ baz", .ident, "baz");
+}
+
+test "lexer: nested block comments" {
+    try expectTokenValue("/* outer /* inner */ still outer */ foo", .ident, "foo");
+    try expectTokenValue("/* a /* b /* c */ b */ a */ x", .ident, "x");
+}
+
+// -------------------------------------------------------------------------
+// Whitespace tests
+// -------------------------------------------------------------------------
+
+test "lexer: leading whitespace skipped" {
+    try expectTokenValue("  \t\n\r  foo", .ident, "foo");
+    try expectTokenValue("\n\n\nbar", .ident, "bar");
+}
+
+// -------------------------------------------------------------------------
+// Edge cases
+// -------------------------------------------------------------------------
+
+test "lexer: empty input produces eof" {
+    try expectTokenSequence("", &.{.eof});
+}
+
+test "lexer: whitespace-only input produces eof" {
+    try expectTokenSequence("   \t\n\r\n   ", &.{.eof});
+}
+
+test "lexer: comment-only input produces eof" {
+    try expectTokenSequence("// just a comment", &.{.eof});
+}
+
+test "lexer: unknown characters produce errors" {
+    try expectError("$");
+    try expectError("#");
+    try expectError("`");
+    try expectError("\\");
+    try expectError("\"");
+    try expectError("'");
+    try expectError("?");
+}
+
+// -------------------------------------------------------------------------
+// Token sequence tests (full shader snippets)
+// -------------------------------------------------------------------------
+
+test "lexer: function returning vec4f" {
+    const input: [:0]const u8 = "fn main() -> vec4f { return vec4f(1.0); }";
+    try expectTokenSequence(input, &.{
+        .keyword_fn,
+        .ident, // main
+        .l_paren,
+        .r_paren,
+        .arrow,
+        .ident, // vec4f
+        .l_brace,
+        .keyword_return,
+        .ident, // vec4f
+        .l_paren,
+        .float_literal, // 1.0
+        .r_paren,
+        .semicolon,
+        .r_brace,
+        .eof,
+    });
+}
+
+test "lexer: struct declaration" {
+    const input: [:0]const u8 =
+        \\struct VertexOutput {
+        \\    @builtin(position) pos: vec4f,
+        \\    @location(0) color: vec3f,
+        \\}
+    ;
+    try expectTokenSequence(input, &.{
+        .keyword_struct,
+        .ident, // VertexOutput
+        .l_brace,
+        .at,
+        .ident, // builtin
+        .l_paren,
+        .ident, // position
+        .r_paren,
+        .ident, // pos
+        .colon,
+        .ident, // vec4f
+        .comma,
+        .at,
+        .ident, // location
+        .l_paren,
+        .int_literal, // 0
+        .r_paren,
+        .ident, // color
+        .colon,
+        .ident, // vec3f
+        .comma,
+        .r_brace,
+        .eof,
+    });
+}
+
+test "lexer: var declaration with group and binding" {
+    const input: [:0]const u8 = "@group(0) @binding(1) var<uniform> uniforms: Uniforms;";
+    try expectTokenSequence(input, &.{
+        .at,
+        .ident, // group
+        .l_paren,
+        .int_literal, // 0
+        .r_paren,
+        .at,
+        .ident, // binding
+        .l_paren,
+        .int_literal, // 1
+        .r_paren,
+        .keyword_var,
+        .lt,
+        .ident, // uniform
+        .gt,
+        .ident, // uniforms
+        .colon,
+        .ident, // Uniforms
+        .semicolon,
+        .eof,
+    });
+}
+
+test "lexer: compute shader header" {
+    const input: [:0]const u8 =
+        \\@compute @workgroup_size(64, 1, 1)
+        \\fn main(@builtin(global_invocation_id) id: vec3u) {
+    ;
+    try expectTokenSequence(input, &.{
+        .at,
+        .ident, // compute
+        .at,
+        .ident, // workgroup_size
+        .l_paren,
+        .int_literal, // 64
+        .comma,
+        .int_literal, // 1
+        .comma,
+        .int_literal, // 1
+        .r_paren,
+        .keyword_fn,
+        .ident, // main
+        .l_paren,
+        .at,
+        .ident, // builtin
+        .l_paren,
+        .ident, // global_invocation_id
+        .r_paren,
+        .ident, // id
+        .colon,
+        .ident, // vec3u
+        .r_paren,
+        .l_brace,
+        .eof,
+    });
+}
+
+test "lexer: let declaration" {
+    const input: [:0]const u8 = "let x = 1;";
+    try expectTokenSequence(input, &.{
+        .keyword_let,
+        .ident, // x
+        .eq,
+        .int_literal, // 1
+        .semicolon,
+        .eof,
+    });
+}
+
+test "lexer: member access chain" {
+    const input: [:0]const u8 = "a.b.c.d";
+    try expectTokenSequence(input, &.{
+        .ident, // a
+        .dot,
+        .ident, // b
+        .dot,
+        .ident, // c
+        .dot,
+        .ident, // d
+        .eof,
+    });
+}
+
+test "lexer: swizzle access" {
+    const input: [:0]const u8 = "pos.xyz";
+    try expectTokenSequence(input, &.{
+        .ident, // pos
+        .dot,
+        .ident, // xyz
+        .eof,
+    });
+}
+
+test "lexer: number then member access is int dot ident" {
+    // "v.x" — identifier, dot, identifier (not a float)
+    const input: [:0]const u8 = "v.x";
+    try expectTokenSequence(input, &.{
+        .ident,
+        .dot,
+        .ident,
+        .eof,
+    });
+}
+
+test "lexer: double underscore prefix stops tokenizing (error then eof)" {
+    const input: [:0]const u8 = "__invalid";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tokens = try tokenize(arena.allocator(), input);
+    const tags = tokens.items(.tag);
+    // tokenize() stops at the first error token and appends nothing after it
+    try std.testing.expect(tags.len > 0);
+    try std.testing.expectEqual(Tag.@"error", tags[0]);
+}
+
+// -------------------------------------------------------------------------
+// Tag.symbol() helper test
+// -------------------------------------------------------------------------
+
+test "lexer: Tag.symbol returns readable text" {
+    try std.testing.expectEqualStrings("+", Tag.plus.symbol());
+    try std.testing.expectEqualStrings("-", Tag.minus.symbol());
+    try std.testing.expectEqualStrings("*", Tag.star.symbol());
+    try std.testing.expectEqualStrings("/", Tag.slash.symbol());
+    try std.testing.expectEqualStrings("%", Tag.percent.symbol());
+    try std.testing.expectEqualStrings("&", Tag.amp.symbol());
+    try std.testing.expectEqualStrings("|", Tag.pipe.symbol());
+    try std.testing.expectEqualStrings("^", Tag.caret.symbol());
+    try std.testing.expectEqualStrings("~", Tag.tilde.symbol());
+    try std.testing.expectEqualStrings("!", Tag.bang.symbol());
+    try std.testing.expectEqualStrings("<", Tag.lt.symbol());
+    try std.testing.expectEqualStrings(">", Tag.gt.symbol());
+    try std.testing.expectEqualStrings("=", Tag.eq.symbol());
+    try std.testing.expectEqualStrings(".", Tag.dot.symbol());
+    try std.testing.expectEqualStrings("@", Tag.at.symbol());
+    try std.testing.expectEqualStrings("++", Tag.plus_plus.symbol());
+    try std.testing.expectEqualStrings("--", Tag.minus_minus.symbol());
+    try std.testing.expectEqualStrings("&&", Tag.amp_amp.symbol());
+    try std.testing.expectEqualStrings("||", Tag.pipe_pipe.symbol());
+    try std.testing.expectEqualStrings("<<", Tag.lt_lt.symbol());
+    try std.testing.expectEqualStrings(">>", Tag.gt_gt.symbol());
+    try std.testing.expectEqualStrings("<=", Tag.lt_eq.symbol());
+    try std.testing.expectEqualStrings(">=", Tag.gt_eq.symbol());
+    try std.testing.expectEqualStrings("==", Tag.eq_eq.symbol());
+    try std.testing.expectEqualStrings("!=", Tag.bang_eq.symbol());
+    try std.testing.expectEqualStrings("->", Tag.arrow.symbol());
+    try std.testing.expectEqualStrings("+=", Tag.plus_eq.symbol());
+    try std.testing.expectEqualStrings("-=", Tag.minus_eq.symbol());
+    try std.testing.expectEqualStrings("*=", Tag.star_eq.symbol());
+    try std.testing.expectEqualStrings("/=", Tag.slash_eq.symbol());
+    try std.testing.expectEqualStrings("%=", Tag.percent_eq.symbol());
+    try std.testing.expectEqualStrings("&=", Tag.amp_eq.symbol());
+    try std.testing.expectEqualStrings("|=", Tag.pipe_eq.symbol());
+    try std.testing.expectEqualStrings("^=", Tag.caret_eq.symbol());
+    try std.testing.expectEqualStrings("<<=", Tag.lt_lt_eq.symbol());
+    try std.testing.expectEqualStrings(">>=", Tag.gt_gt_eq.symbol());
+    try std.testing.expectEqualStrings("(", Tag.l_paren.symbol());
+    try std.testing.expectEqualStrings(")", Tag.r_paren.symbol());
+    try std.testing.expectEqualStrings("{", Tag.l_brace.symbol());
+    try std.testing.expectEqualStrings("}", Tag.r_brace.symbol());
+    try std.testing.expectEqualStrings("[", Tag.l_bracket.symbol());
+    try std.testing.expectEqualStrings("]", Tag.r_bracket.symbol());
+    try std.testing.expectEqualStrings(";", Tag.semicolon.symbol());
+    try std.testing.expectEqualStrings(":", Tag.colon.symbol());
+    try std.testing.expectEqualStrings(",", Tag.comma.symbol());
+    try std.testing.expectEqualStrings("_", Tag.underscore.symbol());
+}
+
+// -------------------------------------------------------------------------
+// isIdentStart / isIdentContinue / isDigit / isHexDigit helper tests
+// -------------------------------------------------------------------------
+
+// -------------------------------------------------------------------------
+// Float suffix after decimal point (1.f, 1.h)
+// -------------------------------------------------------------------------
+
+test "lexer: float suffix after decimal point" {
+    try expectTokenValue("1.f", .float_literal, "1.f");
+    try expectTokenValue("0.f", .float_literal, "0.f");
+    try expectTokenValue("1.h", .float_literal, "1.h");
+    try expectTokenValue("0.h", .float_literal, "0.h");
+    try expectTokenValue("123.f", .float_literal, "123.f");
+    try expectTokenValue("42.h", .float_literal, "42.h");
+}
+
+test "lexer: float suffix does not capture multi-char ident" {
+    // 1.foo should be int(1), dot, ident(foo) — NOT a float
+    try expectTokenSequence("1.foo", &.{ .int_literal, .dot, .ident, .eof });
+    // 1.fi should be int(1), dot, ident(fi)
+    try expectTokenSequence("1.fi", &.{ .int_literal, .dot, .ident, .eof });
+    // 1.float should be int(1), dot, ident(float)
+    try expectTokenSequence("1.float", &.{ .int_literal, .dot, .ident, .eof });
+}
+
+test "lexer: float suffix in expressions" {
+    try expectTokenSequence("abs(1.f)", &.{ .ident, .l_paren, .float_literal, .r_paren, .eof });
+    try expectTokenSequence("vec4<f32>(1.f)", &.{ .ident, .lt, .ident, .gt, .l_paren, .float_literal, .r_paren, .eof });
+}
+
+test "lexer: isIdentStart accepts letters and underscore" {
+    try std.testing.expect(isIdentStart('a'));
+    try std.testing.expect(isIdentStart('z'));
+    try std.testing.expect(isIdentStart('A'));
+    try std.testing.expect(isIdentStart('Z'));
+    try std.testing.expect(isIdentStart('_'));
+}
+
+test "lexer: isIdentStart rejects digits and operators" {
+    try std.testing.expect(!isIdentStart('0'));
+    try std.testing.expect(!isIdentStart('9'));
+    try std.testing.expect(!isIdentStart('+'));
+    try std.testing.expect(!isIdentStart('-'));
+    try std.testing.expect(!isIdentStart(' '));
+    try std.testing.expect(!isIdentStart('@'));
+    try std.testing.expect(!isIdentStart(0x80)); // non-ASCII
+}
+
+test "lexer: isIdentContinue accepts letters, digits, and underscore" {
+    try std.testing.expect(isIdentContinue('a'));
+    try std.testing.expect(isIdentContinue('z'));
+    try std.testing.expect(isIdentContinue('A'));
+    try std.testing.expect(isIdentContinue('Z'));
+    try std.testing.expect(isIdentContinue('0'));
+    try std.testing.expect(isIdentContinue('9'));
+    try std.testing.expect(isIdentContinue('_'));
+}
+
+test "lexer: isIdentContinue rejects operators and non-ASCII" {
+    try std.testing.expect(!isIdentContinue('+'));
+    try std.testing.expect(!isIdentContinue('-'));
+    try std.testing.expect(!isIdentContinue(' '));
+    try std.testing.expect(!isIdentContinue('@'));
+    try std.testing.expect(!isIdentContinue('.'));
+    try std.testing.expect(!isIdentContinue(0x80)); // non-ASCII
+}
+
+test "lexer: isDigit" {
+    for ('0'..('9' + 1)) |c| {
+        try std.testing.expect(isDigit(@intCast(c)));
+    }
+    try std.testing.expect(!isDigit('a'));
+    try std.testing.expect(!isDigit(' '));
+    try std.testing.expect(!isDigit('/'));
+}
+
+test "lexer: isHexDigit" {
+    for ('0'..('9' + 1)) |c| {
+        try std.testing.expect(isHexDigit(@intCast(c)));
+    }
+    for ('a'..('f' + 1)) |c| {
+        try std.testing.expect(isHexDigit(@intCast(c)));
+    }
+    for ('A'..('F' + 1)) |c| {
+        try std.testing.expect(isHexDigit(@intCast(c)));
+    }
+    try std.testing.expect(!isHexDigit('g'));
+    try std.testing.expect(!isHexDigit('G'));
+    try std.testing.expect(!isHexDigit(' '));
+    try std.testing.expect(!isHexDigit('x'));
 }

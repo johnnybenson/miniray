@@ -1072,3 +1072,120 @@ test "parseWorkgroupSize" {
     const empty = parseWorkgroupSize(&.{});
     try testing.expectEqual([3]u32{ 1, 1, 1 }, empty);
 }
+
+test "getSymbolName valid ref" {
+    const symbols = [_]Ast.Symbol{
+        .{ .original_name = "foo", .kind = .function, .flags = .{} },
+        .{ .original_name = "bar", .kind = .@"var", .flags = .{} },
+    };
+    try std.testing.expectEqualStrings("foo", getSymbolName(@enumFromInt(0), &symbols));
+    try std.testing.expectEqualStrings("bar", getSymbolName(@enumFromInt(1), &symbols));
+}
+
+test "getSymbolName invalid ref" {
+    const symbols = [_]Ast.Symbol{
+        .{ .original_name = "foo", .kind = .function, .flags = .{} },
+    };
+    try std.testing.expectEqualStrings("", getSymbolName(Ast.SymbolIndex.none, &symbols));
+}
+
+test "getSymbolName out of bounds" {
+    const symbols = [_]Ast.Symbol{
+        .{ .original_name = "foo", .kind = .function, .flags = .{} },
+    };
+    try std.testing.expectEqualStrings("", getSymbolName(@enumFromInt(10), &symbols));
+}
+
+test "getSymbolName empty symbols" {
+    const symbols = [_]Ast.Symbol{};
+    try std.testing.expectEqualStrings("", getSymbolName(@enumFromInt(0), &symbols));
+}
+
+test "parseIntAttr literal" {
+    var lit = Ast.LiteralExpr{ .kind = .int_literal, .value = "42" };
+    try std.testing.expectEqual(@as(i32, 42), parseIntAttr(.{ .literal = &lit }));
+}
+
+test "parseIntAttr non-integer literal" {
+    var lit = Ast.LiteralExpr{ .kind = .float_literal, .value = "1.5" };
+    try std.testing.expectEqual(@as(i32, -1), parseIntAttr(.{ .literal = &lit }));
+}
+
+test "parseIntAttr non-literal expr" {
+    var ident = Ast.IdentExpr{ .name = "someConst" };
+    try std.testing.expectEqual(@as(i32, -1), parseIntAttr(.{ .ident = &ident }));
+}
+
+test "addressSpaceToString" {
+    try std.testing.expectEqualStrings("uniform", addressSpaceToString(.uniform));
+    try std.testing.expectEqualStrings("storage", addressSpaceToString(.storage));
+    try std.testing.expectEqualStrings("handle", addressSpaceToString(.handle));
+    try std.testing.expectEqualStrings("", addressSpaceToString(.none));
+}
+
+test "isHandleType texture type" {
+    var tex = Ast.TextureType{ .kind = .sampled, .dimension = .@"2d" };
+    try std.testing.expect(isHandleType(.{ .texture = &tex }));
+}
+
+test "isHandleType non-handle types" {
+    var vec = Ast.VecType{ .size = 3 };
+    try std.testing.expect(!isHandleType(.{ .vec = &vec }));
+
+    var mat = Ast.MatType{ .cols = 4, .rows = 4 };
+    try std.testing.expect(!isHandleType(.{ .mat = &mat }));
+
+    var arr = Ast.ArrayType{};
+    try std.testing.expect(!isHandleType(.{ .array = &arr }));
+}
+
+test "isHandleType various sampler/texture ident types" {
+    const handle_names = [_][]const u8{
+        "sampler",         "sampler_comparison",
+        "texture_1d",      "texture_2d",          "texture_2d_array",
+        "texture_3d",      "texture_cube",         "texture_cube_array",
+        "texture_external",
+    };
+    for (handle_names) |name| {
+        var ident = Ast.IdentType{ .name = name };
+        try std.testing.expect(isHandleType(.{ .ident = &ident }));
+    }
+}
+
+test "roundUp zero alignment" {
+    try std.testing.expectEqual(@as(u32, 10), roundUp(10, 0));
+}
+
+test "roundUp various values" {
+    try std.testing.expectEqual(@as(u32, 0), roundUp(0, 4));
+    try std.testing.expectEqual(@as(u32, 4), roundUp(1, 4));
+    try std.testing.expectEqual(@as(u32, 4), roundUp(4, 4));
+    try std.testing.expectEqual(@as(u32, 8), roundUp(5, 4));
+    try std.testing.expectEqual(@as(u32, 16), roundUp(12, 16));
+    try std.testing.expectEqual(@as(u32, 16), roundUp(16, 16));
+    try std.testing.expectEqual(@as(u32, 32), roundUp(17, 16));
+}
+
+test "computeVecLayout edge cases" {
+    // vec3<f32>: size=12, align=16
+    const v3 = computeVecLayout(3, 4);
+    try std.testing.expectEqual(@as(u32, 12), v3.size);
+    try std.testing.expectEqual(@as(u32, 16), v3.alignment);
+
+    // Invalid size returns zero layout
+    const invalid = computeVecLayout(5, 4);
+    try std.testing.expectEqual(@as(u32, 0), invalid.size);
+    try std.testing.expectEqual(@as(u32, 0), invalid.alignment);
+}
+
+test "computeMatLayout mat2x2" {
+    const m = computeMatLayout(2, 2, 4);
+    try std.testing.expectEqual(@as(u32, 16), m.size);
+    try std.testing.expectEqual(@as(u32, 8), m.alignment);
+}
+
+test "computeMatLayout mat3x3" {
+    const m = computeMatLayout(3, 3, 4);
+    try std.testing.expectEqual(@as(u32, 48), m.size);
+    try std.testing.expectEqual(@as(u32, 16), m.alignment);
+}

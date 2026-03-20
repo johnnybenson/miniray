@@ -37,6 +37,15 @@ fn minifyMangleExt(allocator: std.mem.Allocator, input: [:0]const u8) !miniray.M
     });
 }
 
+fn minifyWithDCE(allocator: std.mem.Allocator, input: [:0]const u8) !miniray.Minifier.Result {
+    return miniray.minifyWithOptions(allocator, input, .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .minify_syntax = false,
+        .tree_shaking = true,
+    });
+}
+
 /// Check for pattern: "const " followed by single lowercase letter, "=", then letter.
 /// Equivalent to Go regexp `const [a-z]=[a-zA-Z]`.
 fn hasConstAliasPattern(code: []const u8) bool {
@@ -1236,4 +1245,872 @@ test "TestShadowingRealisticSDF" {
 
     // Should be minified (at least 25% smaller)
     try std.testing.expect(result.code.len <= source.len * 3 / 4);
+}
+
+// =========================================================================
+// 29. SceneW Regression Tests – Inline Array Initialization
+// =========================================================================
+
+test "SceneW: simple inline array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test() { var pos = array(1, 2, 3); }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: inline array with vec2f" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test() {
+        \\  var pos = array(
+        \\    vec2f(-1.0, -1.0),
+        \\    vec2f(-1.0, 3.0),
+        \\    vec2f(3.0, -1.0),
+        \\  );
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: inline array indexing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(idx: u32) -> vec2f {
+        \\  var pos = array(
+        \\    vec2f(-1.0, -1.0),
+        \\    vec2f(-1.0, 3.0),
+        \\  );
+        \\  return pos[idx];
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: inline array in expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(index: u32) -> vec2f {
+        \\  let position = array<vec2<f32>, 3>(
+        \\    vec2f(0.0, 0.0),
+        \\    vec2f(1.0, 0.0),
+        \\    vec2f(0.0, 1.0)
+        \\  )[index];
+        \\  return position;
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 30. SceneW Regression Tests – Struct Declaration Variations
+// =========================================================================
+
+test "SceneW: struct with trailing semicolon" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\struct Foo { x: f32, y: f32, };
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: struct without trailing semicolon" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\struct Foo { x: f32, y: f32, }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 31. SceneW Regression Tests – For Loop Parsing
+// =========================================================================
+
+test "SceneW: basic for loop" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test() { for (var i = 0; i < 10; i++) {} }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: for loop with i += 1" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test() { for (var i = 0; i < 10; i += 1) {} }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: for loop with typed var" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test() { for (var i: u32 = 0u; i < 10u; i++) {} }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: nested for loops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test() {
+        \\  for (var i = 0u; i < 10u; i++) {
+        \\    for (var j = 0u; j < 10u; j++) {}
+        \\  }
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 32. SceneW Regression Tests – Type Casting
+// =========================================================================
+
+test "SceneW: u32 cast" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(x: f32) -> u32 { return u32(x); }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: i32 cast" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(x: f32) -> i32 { return i32(x); }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: f32 cast" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(x: i32) -> f32 { return f32(x); }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: cast in switch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(phase: f32) {
+        \\  switch u32(phase) {
+        \\    case 0u: {}
+        \\    default: {}
+        \\  }
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: cast in expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(n: u32) -> f32 { return f32(n) * 2.0; }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 33. SceneW Regression Tests – Array Type with Size Expression
+// =========================================================================
+
+test "SceneW: array with const size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\const N = 10;
+        \\var arr: array<f32, N>;
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: array with literal size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\var arr: array<f32, 64>;
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: array with expression size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\const movements: u32 = 3;
+        \\fn test() {
+        \\  let position = array<vec2<f32>, movements>(
+        \\    vec2f(0.0),
+        \\    vec2f(1.0),
+        \\    vec2f(2.0)
+        \\  );
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 34. SceneW Regression Tests – Const with Type Annotation
+// =========================================================================
+
+test "SceneW: const with u32 type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\const movements: u32 = 3;
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: const with f32 type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\const PI: f32 = 3.14159;
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 35. SceneW Regression Tests – Complex Real-World Patterns
+// =========================================================================
+
+test "SceneW: vertex shader with inline array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\@vertex
+        \\fn vs_test(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4f {
+        \\  var pos = array(
+        \\    vec2f(-1.0, -1.0),
+        \\    vec2f(-1.0, 3.0),
+        \\    vec2f(3.0, -1.0),
+        \\  );
+        \\  let xy = pos[vertexIndex];
+        \\  return vec4f(xy, 0.0, 1.0);
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: switch with u32 cast" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(beat: f32) -> f32 {
+        \\  let phase = floor(beat / 4.0) % 4.0;
+        \\  var value: f32;
+        \\  switch u32(phase) {
+        \\    case 0u: { value = 1.0; }
+        \\    case 2u: { value = 2.0; }
+        \\    default: { value = 0.0; }
+        \\  }
+        \\  return value;
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: bezier result struct" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\struct BezierResult {
+        \\  dist: f32,
+        \\  point: vec2f,
+        \\}
+        \\fn bezier(pos: vec2f, A: vec2f, B: vec2f, C: vec2f) -> BezierResult {
+        \\  return BezierResult(1.0, vec2f(0.0));
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: texture_external type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\@group(1) @binding(1) var videoTexture: texture_external;
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// 36. SceneW Regression Tests – Trailing Comma in Function Parameters
+// =========================================================================
+
+test "SceneW: trailing comma single param" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(x: f32,) -> f32 { return x; }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: trailing comma multiple params" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn test(x: f32, y: f32,) -> f32 { return x + y; }
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: trailing comma vertex shader" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\@vertex
+        \\fn vs_main(
+        \\  @builtin(vertex_index) vertexIndex: u32,
+        \\  @location(0) position: vec4f,
+        \\) -> @builtin(position) vec4f {
+        \\  return position;
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "SceneW: trailing comma compute shader" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\@compute @workgroup_size(64)
+        \\fn main(
+        \\  @builtin(global_invocation_id) id: vec3u,
+        \\) {}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// =========================================================================
+// DCE Integration Tests (ported from Go internal/minifier_tests/dce_test.go)
+// =========================================================================
+
+test "DCE: basic unused function removal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\fn unused() {}
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(1.0);
+        \\}
+    );
+
+    try std.testing.expect(!contains(result.code, "unused"));
+    try std.testing.expect(contains(result.code, "main"));
+}
+
+test "DCE: basic used function kept" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\fn helper() -> f32 { return 1.0; }
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(helper());
+        \\}
+    );
+
+    try std.testing.expect(count(result.code, "fn ") >= 2);
+}
+
+test "DCE: unused const removal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\const UNUSED: f32 = 3.14;
+        \\const USED: f32 = 2.71;
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(USED);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "const "));
+}
+
+test "DCE: unused struct removal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\struct Unused { x: f32 }
+        \\struct Used { y: f32 }
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    var u: Used;
+        \\    u.y = 1.0;
+        \\    return vec4f(u.y);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "struct "));
+}
+
+test "DCE: transitive dependency chain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\const A: f32 = 1.0;
+        \\const B: f32 = A + 1.0;
+        \\const C: f32 = B + 1.0;
+        \\const UNUSED: f32 = 999.0;
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(C);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), count(result.code, "const "));
+}
+
+test "DCE: function call chain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\fn a() -> f32 { return 1.0; }
+        \\fn b() -> f32 { return a() + 1.0; }
+        \\fn c() -> f32 { return b() + 1.0; }
+        \\fn unused() -> f32 { return 0.0; }
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(c());
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), count(result.code, "fn "));
+}
+
+test "DCE: multiple entry points" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\fn used_by_both() -> f32 { return 1.0; }
+        \\fn vertex_only() -> f32 { return 2.0; }
+        \\fn fragment_only() -> f32 { return 3.0; }
+        \\fn unused() -> f32 { return 4.0; }
+        \\
+        \\@vertex fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4f {
+        \\    return vec4f(used_by_both() + vertex_only());
+        \\}
+        \\
+        \\@fragment fn fs_main() -> @location(0) vec4f {
+        \\    return vec4f(used_by_both() + fragment_only());
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 5), count(result.code, "fn "));
+}
+
+test "DCE: struct used in return type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\struct VertexOutput {
+        \\    @builtin(position) pos: vec4f,
+        \\}
+        \\
+        \\struct Unused {
+        \\    x: f32,
+        \\}
+        \\
+        \\@vertex fn main() -> VertexOutput {
+        \\    var out: VertexOutput;
+        \\    out.pos = vec4f(0.0);
+        \\    return out;
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "struct "));
+}
+
+test "DCE: compute shader" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\struct Particle { pos: vec3f, vel: vec3f }
+        \\
+        \\fn unused_helper() {}
+        \\
+        \\fn apply_force(p: ptr<function, Particle>) {
+        \\    (*p).vel += vec3f(0.0, -9.8, 0.0);
+        \\}
+        \\
+        \\@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+        \\
+        \\@compute @workgroup_size(64)
+        \\fn main(@builtin(global_invocation_id) id: vec3u) {
+        \\    var p = particles[id.x];
+        \\    apply_force(&p);
+        \\    particles[id.x] = p;
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), count(result.code, "fn "));
+}
+
+test "DCE: no entry point keeps everything" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\fn a() -> f32 { return 1.0; }
+        \\fn b() -> f32 { return 2.0; }
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), count(result.code, "fn "));
+}
+
+test "DCE: unused alias removal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\alias UsedFloat = f32;
+        \\alias UnusedInt = i32;
+        \\
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    var x: UsedFloat = 1.0;
+        \\    return vec4f(x);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "alias "));
+}
+
+test "DCE: unused override removal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\override USED: f32 = 1.0;
+        \\override UNUSED: f32 = 2.0;
+        \\
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(USED);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "override "));
+}
+
+test "DCE: const_assert kept" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\const_assert 1 == 1;
+        \\
+        \\fn unused() {}
+        \\
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(1.0);
+        \\}
+    );
+
+    try std.testing.expect(contains(result.code, "const_assert"));
+}
+
+test "DCE: directives kept" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\enable f16;
+        \\
+        \\fn unused() {}
+        \\
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(1.0);
+        \\}
+    );
+
+    try std.testing.expect(contains(result.code, "enable"));
+}
+
+test "DCE: unused external bindings removed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\struct Uniforms { time: f32 }
+        \\@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+        \\@group(0) @binding(1) var<uniform> unused_uniforms: Uniforms;
+        \\
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(uniforms.time);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "var<uniform>"));
+}
+
+test "DCE: disabled keeps all functions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try miniray.minifyWithOptions(alloc,
+        \\fn unused() {}
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    return vec4f(1.0);
+        \\}
+    , .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .tree_shaking = false,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), count(result.code, "fn "));
+}
+
+test "DCE: array type with const size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try minifyWithDCE(alloc,
+        \\const SIZE: u32 = 10u;
+        \\const UNUSED: u32 = 20u;
+        \\
+        \\@fragment fn main() -> @location(0) vec4f {
+        \\    var arr: array<f32, SIZE>;
+        \\    arr[0] = 1.0;
+        \\    return vec4f(arr[0]);
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), count(result.code, "const "));
 }

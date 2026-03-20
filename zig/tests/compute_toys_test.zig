@@ -323,3 +323,76 @@ test "compute.toys: struct type renaming - multiple usages" {
     );
     try std.testing.expect(std.mem.indexOf(u8, result, "Transform2D") == null);
 }
+
+// =========================================================================
+// compute.toys: preserves dispatch info
+// =========================================================================
+
+test "compute.toys: preserves dispatch info" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try computeToys(arena.allocator(),
+        \\@compute @workgroup_size(16, 16)
+        \\fn main_image(@builtin(global_invocation_id) id: vec3u) {
+        \\    let dispatchId = dispatch.id;
+        \\}
+    );
+    try std.testing.expect(std.mem.indexOf(u8, result, "dispatch.id") != null);
+}
+
+// =========================================================================
+// compute.toys: per-file size reduction
+// =========================================================================
+
+fn expectSizeReduction(allocator: std.mem.Allocator, source_bytes: []const u8) !void {
+    const buf = try allocator.alloc(u8, source_bytes.len + 1);
+    @memcpy(buf[0..source_bytes.len], source_bytes);
+    buf[source_bytes.len] = 0;
+    const source = buf[0..source_bytes.len :0];
+
+    const r = try miniray.minifyWithOptions(allocator, source, computeToysOptions());
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    try std.testing.expect(r.minified_size < r.original_size);
+}
+
+test "compute.toys: size reduction circle_sample.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_circle_sample);
+}
+
+test "compute.toys: size reduction bridge.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_bridge);
+}
+
+test "compute.toys: size reduction cubes_in_space.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_cubes_in_space);
+}
+
+test "compute.toys: size reduction jitter_starfield.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_jitter_starfield);
+}
+
+test "compute.toys: size reduction mouse_draw.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_mouse_draw);
+}
+
+test "compute.toys: size reduction prelude.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_prelude);
+}
+
+test "compute.toys: size reduction spaced.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectSizeReduction(arena.allocator(), @import("semantic_data").ct_spaced);
+}

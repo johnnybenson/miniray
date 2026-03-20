@@ -77,4 +77,5 @@ comptime {
     _ = Validator;
     _ = Reflect;
     _ = SourceMap;
+    _ = Dce;
 }

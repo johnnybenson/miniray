@@ -1305,6 +1305,50 @@ test "array type" {
     try std.testing.expectEqual(@as(u32, 0), ra.size());
 }
 
+test "multiplyResultType for 6 cases" {
+    const allocator = std.testing.allocator;
+
+    // mat4x4 * vec4 -> vec4
+    const mat44 = try mat(allocator, 4, 4, &scalar_f32);
+    defer allocator.destroy(mat44.matrix);
+    const vec4 = try vec(allocator, 4, &scalar_f32);
+    defer allocator.destroy(vec4.vector);
+
+    const mat_vec = try multiplyResultType(allocator, mat44, vec4);
+    try std.testing.expect(mat_vec != null);
+    try std.testing.expect(mat_vec.? == .vector);
+    defer allocator.destroy(mat_vec.?.vector);
+    try std.testing.expectEqual(@as(u8, 4), mat_vec.?.vector.width);
+
+    // vec4 * mat4x4 -> vec4
+    const vec_mat = try multiplyResultType(allocator, vec4, mat44);
+    try std.testing.expect(vec_mat != null);
+    try std.testing.expect(vec_mat.? == .vector);
+    defer allocator.destroy(vec_mat.?.vector);
+
+    // scalar * vec -> vec
+    const scalar_vec = try multiplyResultType(allocator, F32, vec4);
+    try std.testing.expect(scalar_vec != null);
+    try std.testing.expect(scalar_vec.? == .vector);
+    defer allocator.destroy(scalar_vec.?.vector);
+
+    // scalar * mat -> mat
+    const scalar_mat = try multiplyResultType(allocator, F32, mat44);
+    try std.testing.expect(scalar_mat != null);
+    try std.testing.expect(scalar_mat.? == .matrix);
+    defer allocator.destroy(scalar_mat.?.matrix);
+
+    // mat * mat (same dims) -> mat
+    const mat_mat = try multiplyResultType(allocator, mat44, mat44);
+    try std.testing.expect(mat_mat != null);
+
+    // mat * scalar -> mat
+    const mat_scalar = try multiplyResultType(allocator, mat44, F32);
+    try std.testing.expect(mat_scalar != null);
+    try std.testing.expect(mat_scalar.? == .matrix);
+    defer allocator.destroy(mat_scalar.?.matrix);
+}
+
 test "struct layout" {
     const allocator = std.testing.allocator;
 

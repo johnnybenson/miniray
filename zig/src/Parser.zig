@@ -387,17 +387,14 @@ fn visitExpr(self: *Parser, e: Ast.Expr) Ast.Expr {
                     }
                 }
             }
-            return e;
         },
-        .literal => return e,
+        .literal => {},
         .binary => |expr| {
             expr.left = self.visitExpr(expr.left);
             expr.right = self.visitExpr(expr.right);
-            return e;
         },
         .unary => |expr| {
             expr.operand = self.visitExpr(expr.operand);
-            return e;
         },
         .call => |expr| {
             if (expr.func) |f| expr.func = self.visitExpr(f);
@@ -405,22 +402,20 @@ fn visitExpr(self: *Parser, e: Ast.Expr) Ast.Expr {
             for (expr.args.items, 0..) |arg, j| {
                 expr.args.items[j] = self.visitExpr(arg);
             }
-            return e;
         },
         .index => |expr| {
             expr.base = self.visitExpr(expr.base);
             expr.idx = self.visitExpr(expr.idx);
-            return e;
         },
         .member => |expr| {
             expr.base = self.visitExpr(expr.base);
-            return e;
         },
         .paren => |expr| {
             expr.expr = self.visitExpr(expr.expr);
-            return e;
         },
     }
+    Ast.markExprPurity(e, self.symbols.items);
+    return e;
 }
 
 fn visitType(self: *Parser, t: Ast.Type) void {
@@ -1668,6 +1663,1273 @@ test "parse simple const" {
     _ = module;
     try std.testing.expectEqual(@as(usize, 1), parser.symbols.items.len);
     try std.testing.expectEqualStrings("x", parser.symbols.items[0].original_name);
+}
+
+// -------------------------------------------------------------------------
+// Test helpers
+// -------------------------------------------------------------------------
+
+fn expectPrinted(input: [:0]const u8, expected: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const tokens = try Lexer.tokenize(alloc, input);
+    var parser = Parser.init(alloc, input, tokens);
+    const module = try parser.parse();
+
+    const Renamer = @import("Renamer.zig");
+    const noop = try alloc.create(Renamer.NoOpRenamer);
+    noop.* = Renamer.NoOpRenamer.init(module.symbols.items);
+    noop.renamer.ptr = @ptrCast(noop);
+
+    const Printer = @import("Printer.zig");
+    var printer = Printer.init(alloc, .{
+        .minify_whitespace = false,
+        .minify_identifiers = false,
+        .minify_syntax = false,
+        .tree_shaking = false,
+        .renamer = &noop.renamer,
+    }, module.symbols.items);
+    const actual = try printer.print(module);
+
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+fn expectPrintedMinify(input: [:0]const u8, expected: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const tokens = try Lexer.tokenize(alloc, input);
+    var parser = Parser.init(alloc, input, tokens);
+    const module = try parser.parse();
+
+    const Renamer = @import("Renamer.zig");
+    const noop = try alloc.create(Renamer.NoOpRenamer);
+    noop.* = Renamer.NoOpRenamer.init(module.symbols.items);
+    noop.renamer.ptr = @ptrCast(noop);
+
+    const Printer = @import("Printer.zig");
+    var printer = Printer.init(alloc, .{
+        .minify_whitespace = true,
+        .minify_identifiers = false,
+        .minify_syntax = false,
+        .tree_shaking = false,
+        .renamer = &noop.renamer,
+    }, module.symbols.items);
+    const actual = try printer.print(module);
+
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+fn expectParseError(input: [:0]const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const tokens = try Lexer.tokenize(alloc, input);
+    var parser = Parser.init(alloc, input, tokens);
+    _ = parser.parse() catch return; // error return is sufficient
+    if (parser.errors.items.len > 0) return;
+    return error.TestExpectedError;
+}
+
+fn expectNoError(input: [:0]const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const tokens = try Lexer.tokenize(alloc, input);
+    var parser = Parser.init(alloc, input, tokens);
+    _ = try parser.parse();
+    try std.testing.expectEqual(@as(usize, 0), parser.errors.items.len);
+}
+
+// -------------------------------------------------------------------------
+// Const declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: const declaration" {
+    try expectPrinted("const x = 1;", "const x = 1;\n");
+    try expectPrinted("const x: i32 = 1;", "const x: i32 = 1;\n");
+    try expectPrinted("const x = 1 + 2;", "const x = 1 + 2;\n");
+    try expectPrinted("const PI = 3.14159;", "const PI = 3.14159;\n");
+}
+
+test "parser: const expressions" {
+    try expectPrinted("const x = 1 + 2 * 3;", "const x = 1 + 2 * 3;\n");
+    try expectPrinted("const x = (1 + 2) * 3;", "const x = (1 + 2) * 3;\n");
+    try expectPrinted("const x = -1;", "const x = -1;\n");
+    try expectPrinted("const x = !true;", "const x = !true;\n");
+}
+
+// -------------------------------------------------------------------------
+// Let declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: let declaration" {
+    try expectPrinted("let x = 1;", "let x = 1;\n");
+    try expectPrinted("let x: f32 = 1.0;", "let x: f32 = 1.0;\n");
+}
+
+// -------------------------------------------------------------------------
+// Var declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: var declaration" {
+    try expectPrinted("var x: i32;", "var x: i32;\n");
+    try expectPrinted("var x: i32 = 0;", "var x: i32 = 0;\n");
+    try expectPrinted("var<private> x: i32;", "var<private> x: i32;\n");
+    try expectPrinted("var<workgroup> odds: array<i32, 16>;", "var<workgroup> odds: array<i32, 16>;\n");
+    try expectPrinted("var<storage, read_write> data: array<f32>;", "var<storage, read_write> data: array<f32>;\n");
+}
+
+test "parser: var with attributes" {
+    try expectPrinted("@group(0) @binding(0) var<uniform> u: Uniforms;", "@group(0) @binding(0) var<uniform> u: Uniforms;\n");
+    try expectPrinted("@group(0) @binding(1) var tex: texture_2d<f32>;", "@group(0) @binding(1) var tex: texture_2d<f32>;\n");
+    try expectPrinted("@group(0) @binding(2) var samp: sampler;", "@group(0) @binding(2) var samp: sampler;\n");
+}
+
+test "parser: var without address space" {
+    try expectPrinted("var x: i32 = 0;", "var x: i32 = 0;\n");
+}
+
+// -------------------------------------------------------------------------
+// Override declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: override declaration" {
+    try expectPrinted("override x: f32;", "override x: f32;\n");
+    try expectPrinted("override x: f32 = 1.0;", "override x: f32 = 1.0;\n");
+    try expectPrinted("@id(0) override x: f32;", "@id(0) override x: f32;\n");
+}
+
+// -------------------------------------------------------------------------
+// Struct declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: struct declaration" {
+    try expectPrinted("struct Foo { x: i32, }", "struct Foo {\n    x: i32\n}\n");
+    try expectPrinted("struct Point { x: f32, y: f32, }", "struct Point {\n    x: f32,\n    y: f32\n}\n");
+}
+
+test "parser: struct with attributes" {
+    try expectPrinted(
+        "struct VertexOutput { @builtin(position) pos: vec4f, @location(0) uv: vec2f, }",
+        "struct VertexOutput {\n    @builtin(position) pos: vec4f,\n    @location(0) uv: vec2f\n}\n",
+    );
+}
+
+// -------------------------------------------------------------------------
+// Alias declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: alias declaration" {
+    try expectPrinted("alias Float = f32;", "alias Float = f32;\n");
+    try expectPrinted("alias Vec3 = vec3<f32>;", "alias Vec3 = vec3<f32>;\n");
+}
+
+// -------------------------------------------------------------------------
+// Function declaration tests
+// -------------------------------------------------------------------------
+
+test "parser: function declaration" {
+    try expectPrinted("fn foo() {}", "fn foo() {\n}\n");
+    try expectPrinted("fn foo() -> i32 { return 1; }", "fn foo() -> i32 {\n    return 1;\n}\n");
+    try expectPrinted(
+        "fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        "fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
+}
+
+test "parser: entry point functions" {
+    try expectPrinted(
+        "@vertex fn main() -> @builtin(position) vec4f { return vec4f(); }",
+        "@vertex fn main() -> @builtin(position) vec4f {\n    return vec4f();\n}\n",
+    );
+    try expectPrinted(
+        "@fragment fn main() -> @location(0) vec4f { return vec4f(1.0); }",
+        "@fragment fn main() -> @location(0) vec4f {\n    return vec4f(1.0);\n}\n",
+    );
+    try expectPrinted(
+        "@compute @workgroup_size(64) fn main() {}",
+        "@compute @workgroup_size(64) fn main() {\n}\n",
+    );
+}
+
+test "parser: function with parameter attributes" {
+    try expectPrinted(
+        "@vertex fn main(@location(0) pos: vec4f) -> @builtin(position) vec4f { return pos; }",
+        "@vertex fn main(@location(0) pos: vec4f) -> @builtin(position) vec4f {\n    return pos;\n}\n",
+    );
+}
+
+// -------------------------------------------------------------------------
+// Binary expression tests
+// -------------------------------------------------------------------------
+
+test "parser: binary expressions" {
+    // Arithmetic
+    try expectPrinted("const x = 1 + 2;", "const x = 1 + 2;\n");
+    try expectPrinted("const x = 1 - 2;", "const x = 1 - 2;\n");
+    try expectPrinted("const x = 1 * 2;", "const x = 1 * 2;\n");
+    try expectPrinted("const x = 1 / 2;", "const x = 1 / 2;\n");
+    try expectPrinted("const x = 1 % 2;", "const x = 1 % 2;\n");
+    // Bitwise
+    try expectPrinted("const x = 1 & 2;", "const x = 1 & 2;\n");
+    try expectPrinted("const x = 1 | 2;", "const x = 1 | 2;\n");
+    try expectPrinted("const x = 1 ^ 2;", "const x = 1 ^ 2;\n");
+    try expectPrinted("const x = 1 << 2;", "const x = 1 << 2;\n");
+    try expectPrinted("const x = 1 >> 2;", "const x = 1 >> 2;\n");
+    // Comparison
+    try expectPrinted("const x = 1 == 2;", "const x = 1 == 2;\n");
+    try expectPrinted("const x = 1 != 2;", "const x = 1 != 2;\n");
+    try expectPrinted("const x = 1 < 2;", "const x = 1 < 2;\n");
+    try expectPrinted("const x = 1 <= 2;", "const x = 1 <= 2;\n");
+    try expectPrinted("const x = 1 > 2;", "const x = 1 > 2;\n");
+    try expectPrinted("const x = 1 >= 2;", "const x = 1 >= 2;\n");
+    // Logical
+    try expectPrinted("const x = true && false;", "const x = true && false;\n");
+    try expectPrinted("const x = true || false;", "const x = true || false;\n");
+}
+
+// -------------------------------------------------------------------------
+// Unary expression tests
+// -------------------------------------------------------------------------
+
+test "parser: unary expressions" {
+    try expectPrinted("const x = -1;", "const x = -1;\n");
+    try expectPrinted("const x = !true;", "const x = !true;\n");
+    try expectPrinted("const x = ~1;", "const x = ~1;\n");
+}
+
+// -------------------------------------------------------------------------
+// Call expression tests
+// -------------------------------------------------------------------------
+
+test "parser: call expressions" {
+    try expectPrinted("const x = foo();", "const x = foo();\n");
+    try expectPrinted("const x = foo(1);", "const x = foo(1);\n");
+    try expectPrinted("const x = foo(1, 2);", "const x = foo(1, 2);\n");
+    try expectPrinted("const x = foo(1, 2, 3);", "const x = foo(1, 2, 3);\n");
+}
+
+// -------------------------------------------------------------------------
+// Type constructor tests
+// -------------------------------------------------------------------------
+
+test "parser: type constructors" {
+    try expectPrinted("const x = vec3f(1.0);", "const x = vec3f(1.0);\n");
+    try expectPrinted("const x = vec3f(1.0, 2.0, 3.0);", "const x = vec3f(1.0, 2.0, 3.0);\n");
+    try expectPrinted("const x = vec4f(v.xyz, 1.0);", "const x = vec4f(v.xyz, 1.0);\n");
+    try expectPrinted("const x = mat4x4f();", "const x = mat4x4f();\n");
+}
+
+// -------------------------------------------------------------------------
+// Member access tests
+// -------------------------------------------------------------------------
+
+test "parser: member access" {
+    try expectPrinted("const x = a.b;", "const x = a.b;\n");
+    try expectPrinted("const x = a.b.c;", "const x = a.b.c;\n");
+    try expectPrinted("const x = v.xyz;", "const x = v.xyz;\n");
+    try expectPrinted("const x = v.xyzw;", "const x = v.xyzw;\n");
+}
+
+// -------------------------------------------------------------------------
+// Index access tests
+// -------------------------------------------------------------------------
+
+test "parser: index access" {
+    try expectPrinted("const x = a[0];", "const x = a[0];\n");
+    try expectPrinted("const x = a[i];", "const x = a[i];\n");
+    try expectPrinted("const x = a[i + 1];", "const x = a[i + 1];\n");
+    try expectPrinted("const x = a[0][1];", "const x = a[0][1];\n");
+}
+
+// -------------------------------------------------------------------------
+// Parenthesis tests
+// -------------------------------------------------------------------------
+
+test "parser: parentheses" {
+    try expectPrinted("const x = (1);", "const x = (1);\n");
+    try expectPrinted("const x = (1 + 2) * 3;", "const x = (1 + 2) * 3;\n");
+    try expectPrinted("const x = a * (b + c);", "const x = a * (b + c);\n");
+}
+
+// -------------------------------------------------------------------------
+// Pointer/address-of/deref tests
+// -------------------------------------------------------------------------
+
+test "parser: address-of and deref" {
+    try expectPrinted("fn foo() { let p = &x; }", "fn foo() {\n    let p = &x;\n}\n");
+    try expectPrinted("fn foo() { let v = *p; }", "fn foo() {\n    let v = *p;\n}\n");
+}
+
+// -------------------------------------------------------------------------
+// Statement tests
+// -------------------------------------------------------------------------
+
+test "parser: return statement" {
+    try expectPrinted("fn foo() { return; }", "fn foo() {\n    return;\n}\n");
+    try expectPrinted("fn foo() -> i32 { return 1; }", "fn foo() -> i32 {\n    return 1;\n}\n");
+}
+
+test "parser: if statement" {
+    try expectPrinted(
+        "fn foo() { if true { return; } }",
+        "fn foo() {\n    if true {\n        return;\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { if true { return; } else { return; } }",
+        "fn foo() {\n    if true {\n        return;\n    } else {\n        return;\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { if a { } else if b { } else { } }",
+        "fn foo() {\n    if a {\n    } else if b {\n    } else {\n    }\n}\n",
+    );
+}
+
+test "parser: for statement" {
+    try expectPrinted(
+        "fn foo() { for (var i: i32 = 0; i < 4; i++) { } }",
+        "fn foo() {\n    for (var i: i32 = 0; i < 4; i++) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0u; i < 10u; i++) { x++; } }",
+        "fn foo() {\n    for (var i = 0u; i < 10u; i++) {\n        x++;\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i: i32 = 0; i < 4; i += 2) { } }",
+        "fn foo() {\n    for (var i: i32 = 0; i < 4; i += 2) {\n    }\n}\n",
+    );
+}
+
+test "parser: for loop empty clauses" {
+    try expectPrinted(
+        "fn foo() { for (;;) { break; } }",
+        "fn foo() {\n    for (; ; ) {\n        break;\n    }\n}\n",
+    );
+}
+
+test "parser: for loop update statements" {
+    try expectPrinted(
+        "fn foo() { for (var i = 0; i < 10; i = i + 1) {} }",
+        "fn foo() {\n    for (var i = 0; i < 10; i = i + 1) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0; i < 10; i += 1) {} }",
+        "fn foo() {\n    for (var i = 0; i < 10; i += 1) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 10; i > 0; i -= 1) {} }",
+        "fn foo() {\n    for (var i = 10; i > 0; i -= 1) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 1; i < 100; i *= 2) {} }",
+        "fn foo() {\n    for (var i = 1; i < 100; i *= 2) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 100; i > 1; i /= 2) {} }",
+        "fn foo() {\n    for (var i = 100; i > 1; i /= 2) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0; i < 10; i %= 3) {} }",
+        "fn foo() {\n    for (var i = 0; i < 10; i %= 3) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0xFFu; i > 0u; i &= 0x7Fu) {} }",
+        "fn foo() {\n    for (var i = 0xFFu; i > 0u; i &= 0x7Fu) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0u; i < 255u; i |= 1u) {} }",
+        "fn foo() {\n    for (var i = 0u; i < 255u; i |= 1u) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0u; i < 255u; i ^= 1u) {} }",
+        "fn foo() {\n    for (var i = 0u; i < 255u; i ^= 1u) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 1u; i < 256u; i <<= 1u) {} }",
+        "fn foo() {\n    for (var i = 1u; i < 256u; i <<= 1u) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 256u; i > 0u; i >>= 1u) {} }",
+        "fn foo() {\n    for (var i = 256u; i > 0u; i >>= 1u) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 10; i > 0; i--) {} }",
+        "fn foo() {\n    for (var i = 10; i > 0; i--) {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { for (var i = 0; i < 10; update()) {} }",
+        "fn foo() {\n    for (var i = 0; i < 10; update()) {\n    }\n}\n",
+    );
+}
+
+test "parser: for loop expression initializer" {
+    try expectNoError("fn f() { var i: i32; for (i = 0; i < 10; i += 1) { } }");
+}
+
+test "parser: while statement" {
+    try expectPrinted(
+        "fn foo() { while true { } }",
+        "fn foo() {\n    while true {\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { while x < 10 { x++; } }",
+        "fn foo() {\n    while x < 10 {\n        x++;\n    }\n}\n",
+    );
+}
+
+test "parser: loop statement" {
+    try expectPrinted(
+        "fn foo() { loop { break; } }",
+        "fn foo() {\n    loop {\n        break;\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { loop { if x { break; } } }",
+        "fn foo() {\n    loop {\n        if x {\n            break;\n        }\n    }\n}\n",
+    );
+}
+
+test "parser: loop continuing" {
+    try expectPrinted(
+        "fn foo() { loop { break; } continuing { i++; } }",
+        "fn foo() {\n    loop {\n        break;\n    } continuing {\n        i++;\n    }\n}\n",
+    );
+}
+
+test "parser: switch statement" {
+    try expectPrinted(
+        "fn foo() { switch x { case 1: { } default: { } } }",
+        "fn foo() {\n    switch x {\n        case 1: {\n        }\n        default: {\n        }\n    }\n}\n",
+    );
+}
+
+test "parser: switch multiple selectors" {
+    try expectPrinted(
+        "fn foo() { switch x { case 1, 2, 3: { } default: { } } }",
+        "fn foo() {\n    switch x {\n        case 1, 2, 3: {\n        }\n        default: {\n        }\n    }\n}\n",
+    );
+}
+
+test "parser: switch only default" {
+    try expectPrinted(
+        "fn foo() { switch x { default: { } } }",
+        "fn foo() {\n    switch x {\n        default: {\n        }\n    }\n}\n",
+    );
+}
+
+test "parser: switch default with return" {
+    try expectPrinted(
+        "fn f() { var x: i32; switch x { default: { return; } } }",
+        "fn f() {\n    var x: i32;\n    switch x {\n        default: {\n            return;\n        }\n    }\n}\n",
+    );
+}
+
+test "parser: break and continue" {
+    try expectPrinted(
+        "fn foo() { loop { break; } }",
+        "fn foo() {\n    loop {\n        break;\n    }\n}\n",
+    );
+    try expectPrinted(
+        "fn foo() { loop { continue; } }",
+        "fn foo() {\n    loop {\n        continue;\n    }\n}\n",
+    );
+}
+
+test "parser: break if statement" {
+    try expectPrinted(
+        "fn foo() { loop { } continuing { break if true; } }",
+        "fn foo() {\n    loop {\n    } continuing {\n        break if true;\n    }\n}\n",
+    );
+}
+
+test "parser: discard statement" {
+    try expectPrinted(
+        "@fragment fn main() { discard; }",
+        "@fragment fn main() {\n    discard;\n}\n",
+    );
+}
+
+test "parser: assignment statements" {
+    try expectPrinted("fn foo() { x = 1; }", "fn foo() {\n    x = 1;\n}\n");
+    try expectPrinted("fn foo() { x += 1; }", "fn foo() {\n    x += 1;\n}\n");
+    try expectPrinted("fn foo() { x -= 1; }", "fn foo() {\n    x -= 1;\n}\n");
+    try expectPrinted("fn foo() { x *= 2; }", "fn foo() {\n    x *= 2;\n}\n");
+    try expectPrinted("fn foo() { x /= 2; }", "fn foo() {\n    x /= 2;\n}\n");
+}
+
+test "parser: compound assignment statements" {
+    try expectPrinted("fn foo() { x %= 3; }", "fn foo() {\n    x %= 3;\n}\n");
+    try expectPrinted("fn foo() { x &= 0xFF; }", "fn foo() {\n    x &= 0xFF;\n}\n");
+    try expectPrinted("fn foo() { x |= 1; }", "fn foo() {\n    x |= 1;\n}\n");
+    try expectPrinted("fn foo() { x ^= 0xF; }", "fn foo() {\n    x ^= 0xF;\n}\n");
+    try expectPrinted("fn foo() { x <<= 2u; }", "fn foo() {\n    x <<= 2u;\n}\n");
+    try expectPrinted("fn foo() { x >>= 2u; }", "fn foo() {\n    x >>= 2u;\n}\n");
+}
+
+test "parser: increment and decrement" {
+    try expectPrinted("fn foo() { x++; }", "fn foo() {\n    x++;\n}\n");
+    try expectPrinted("fn foo() { x--; }", "fn foo() {\n    x--;\n}\n");
+}
+
+test "parser: call statement" {
+    try expectPrinted("fn foo() { bar(); }", "fn foo() {\n    bar();\n}\n");
+}
+
+// -------------------------------------------------------------------------
+// Scalar type tests
+// -------------------------------------------------------------------------
+
+test "parser: scalar types" {
+    try expectPrinted("var x: bool;", "var x: bool;\n");
+    try expectPrinted("var x: i32;", "var x: i32;\n");
+    try expectPrinted("var x: u32;", "var x: u32;\n");
+    try expectPrinted("var x: f32;", "var x: f32;\n");
+    try expectPrinted("var x: f16;", "var x: f16;\n");
+}
+
+// -------------------------------------------------------------------------
+// Vector type tests
+// -------------------------------------------------------------------------
+
+test "parser: vector types" {
+    try expectPrinted("var x: vec2<f32>;", "var x: vec2<f32>;\n");
+    try expectPrinted("var x: vec3<f32>;", "var x: vec3<f32>;\n");
+    try expectPrinted("var x: vec4<f32>;", "var x: vec4<f32>;\n");
+    try expectPrinted("var x: vec2f;", "var x: vec2f;\n");
+    try expectPrinted("var x: vec3f;", "var x: vec3f;\n");
+    try expectPrinted("var x: vec4f;", "var x: vec4f;\n");
+    try expectPrinted("var x: vec3i;", "var x: vec3i;\n");
+    try expectPrinted("var x: vec3u;", "var x: vec3u;\n");
+}
+
+// -------------------------------------------------------------------------
+// Matrix type tests
+// -------------------------------------------------------------------------
+
+test "parser: matrix types" {
+    try expectPrinted("var x: mat4x4f;", "var x: mat4x4f;\n");
+    try expectPrinted("var x: mat2x2<f32>;", "var x: mat2x2<f32>;\n");
+    try expectPrinted("var x: mat3x3<f32>;", "var x: mat3x3<f32>;\n");
+    try expectPrinted("var x: mat4x4<f32>;", "var x: mat4x4<f32>;\n");
+    try expectPrinted("var x: mat2x3<f32>;", "var x: mat2x3<f32>;\n");
+}
+
+// -------------------------------------------------------------------------
+// Array type tests
+// -------------------------------------------------------------------------
+
+test "parser: array types" {
+    try expectPrinted("var x: array<f32>;", "var x: array<f32>;\n");
+    try expectPrinted("var x: array<f32, 10>;", "var x: array<f32, 10>;\n");
+    try expectPrinted("var x: array<vec3<f32>, 8>;", "var x: array<vec3<f32>, 8>;\n");
+}
+
+// -------------------------------------------------------------------------
+// Pointer type tests
+// -------------------------------------------------------------------------
+
+test "parser: pointer types" {
+    try expectPrinted("var x: ptr<function, f32>;", "var x: ptr<function, f32>;\n");
+    try expectPrinted("var x: ptr<private, i32>;", "var x: ptr<private, i32>;\n");
+    try expectPrinted("var x: ptr<storage, f32, read_write>;", "var x: ptr<storage, f32, read_write>;\n");
+}
+
+test "parser: multiple template args" {
+    try expectPrinted("var x: ptr<storage, f32, read_write>;", "var x: ptr<storage, f32, read_write>;\n");
+}
+
+// -------------------------------------------------------------------------
+// Atomic type tests
+// -------------------------------------------------------------------------
+
+test "parser: atomic types" {
+    try expectPrinted("var x: atomic<i32>;", "var x: atomic<i32>;\n");
+    try expectPrinted("var x: atomic<u32>;", "var x: atomic<u32>;\n");
+}
+
+// -------------------------------------------------------------------------
+// Texture type tests
+// -------------------------------------------------------------------------
+
+test "parser: texture types" {
+    try expectPrinted("var tex: texture_2d<f32>;", "var tex: texture_2d<f32>;\n");
+    try expectPrinted("var tex: texture_3d<f32>;", "var tex: texture_3d<f32>;\n");
+    try expectPrinted("var tex: texture_cube<f32>;", "var tex: texture_cube<f32>;\n");
+}
+
+test "parser: all texture types" {
+    // Sampled textures
+    try expectPrinted("var tex: texture_1d<f32>;", "var tex: texture_1d<f32>;\n");
+    try expectPrinted("var tex: texture_2d<f32>;", "var tex: texture_2d<f32>;\n");
+    try expectPrinted("var tex: texture_2d_array<f32>;", "var tex: texture_2d_array<f32>;\n");
+    try expectPrinted("var tex: texture_3d<f32>;", "var tex: texture_3d<f32>;\n");
+    try expectPrinted("var tex: texture_cube<f32>;", "var tex: texture_cube<f32>;\n");
+    try expectPrinted("var tex: texture_cube_array<f32>;", "var tex: texture_cube_array<f32>;\n");
+    // Multisampled
+    try expectPrinted("var tex: texture_multisampled_2d<f32>;", "var tex: texture_multisampled_2d<f32>;\n");
+    // Storage textures with format and access mode
+    try expectPrinted("var tex: texture_storage_1d<rgba8unorm, write>;", "var tex: texture_storage_1d<rgba8unorm, write>;\n");
+    try expectPrinted("var tex: texture_storage_2d<rgba8unorm, read>;", "var tex: texture_storage_2d<rgba8unorm, read>;\n");
+    try expectPrinted("var tex: texture_storage_2d_array<rgba8unorm, read_write>;", "var tex: texture_storage_2d_array<rgba8unorm, read_write>;\n");
+    try expectPrinted("var tex: texture_storage_3d<rgba32float, write>;", "var tex: texture_storage_3d<rgba32float, write>;\n");
+    // Depth textures (no template args — parsed as ident type)
+    try expectPrinted("var tex: texture_depth_2d;", "var tex: texture_depth_2d;\n");
+    try expectPrinted("var tex: texture_depth_2d_array;", "var tex: texture_depth_2d_array;\n");
+    try expectPrinted("var tex: texture_depth_cube;", "var tex: texture_depth_cube;\n");
+    try expectPrinted("var tex: texture_depth_cube_array;", "var tex: texture_depth_cube_array;\n");
+    try expectPrinted("var tex: texture_depth_multisampled_2d;", "var tex: texture_depth_multisampled_2d;\n");
+}
+
+test "parser: depth texture types with attributes" {
+    try expectPrinted(
+        "@group(0) @binding(0) var t: texture_depth_2d;",
+        "@group(0) @binding(0) var t: texture_depth_2d;\n",
+    );
+    try expectPrinted(
+        "@group(0) @binding(0) var t: texture_depth_2d_array;",
+        "@group(0) @binding(0) var t: texture_depth_2d_array;\n",
+    );
+    try expectPrinted(
+        "@group(0) @binding(0) var t: texture_depth_cube;",
+        "@group(0) @binding(0) var t: texture_depth_cube;\n",
+    );
+    try expectPrinted(
+        "@group(0) @binding(0) var t: texture_depth_cube_array;",
+        "@group(0) @binding(0) var t: texture_depth_cube_array;\n",
+    );
+    try expectPrinted(
+        "@group(0) @binding(0) var t: texture_depth_multisampled_2d;",
+        "@group(0) @binding(0) var t: texture_depth_multisampled_2d;\n",
+    );
+}
+
+test "parser: depth texture types templated" {
+    // Depth textures with empty template args — the parser parses them as
+    // texture types and the printer emits them without sampled/texel content
+    try expectNoError("var t: texture_depth_2d<>;");
+    try expectNoError("var t: texture_depth_2d_array<>;");
+    try expectNoError("var t: texture_depth_cube<>;");
+    try expectNoError("var t: texture_depth_cube_array<>;");
+    try expectNoError("var t: texture_depth_multisampled_2d<>;");
+}
+
+test "parser: storage texture without access mode" {
+    // Printer emits trailing comma + empty string for the access mode
+    try expectPrinted(
+        "var tex: texture_storage_2d<rgba8unorm>;",
+        "var tex: texture_storage_2d<rgba8unorm, >;\n",
+    );
+}
+
+// -------------------------------------------------------------------------
+// Sampler type tests
+// -------------------------------------------------------------------------
+
+test "parser: sampler types" {
+    try expectPrinted("var s: sampler;", "var s: sampler;\n");
+    try expectPrinted("var s: sampler_comparison;", "var s: sampler_comparison;\n");
+}
+
+// -------------------------------------------------------------------------
+// Directive tests
+// -------------------------------------------------------------------------
+
+test "parser: enable directive" {
+    try expectPrinted("enable f16;", "enable f16;\n");
+    try expectPrinted("enable f16, dual_source_blending;", "enable f16, dual_source_blending;\n");
+    try expectPrinted("enable f16, subgroups;", "enable f16, subgroups;\n");
+}
+
+test "parser: requires directive" {
+    try expectPrinted(
+        "requires readonly_and_readwrite_storage_textures;",
+        "requires readonly_and_readwrite_storage_textures;\n",
+    );
+}
+
+test "parser: diagnostic directive" {
+    try expectPrinted(
+        "diagnostic(off, derivative_uniformity);",
+        "diagnostic(off, derivative_uniformity);\n",
+    );
+}
+
+// -------------------------------------------------------------------------
+// Const assert tests
+// -------------------------------------------------------------------------
+
+test "parser: const assert" {
+    try expectPrinted("const_assert 1 == 1;", "const_assert 1 == 1;\n");
+    try expectPrinted("const_assert SIZE > 0;", "const_assert SIZE > 0;\n");
+    try expectPrinted("const_assert true;", "const_assert true;\n");
+    try expectPrinted("const_assert 1 + 1 == 2;", "const_assert 1 + 1 == 2;\n");
+}
+
+test "parser: const assert at module level" {
+    try expectPrinted("const_assert true;", "const_assert true;\n");
+    try expectPrinted("const_assert 1 == 1;", "const_assert 1 == 1;\n");
+    // Legacy syntax: const const_assert
+    try expectNoError("const const_assert true;");
+}
+
+// -------------------------------------------------------------------------
+// Template expression tests
+// -------------------------------------------------------------------------
+
+test "parser: template additive expressions" {
+    try expectPrinted("var x: array<f32, 10 + 5>;", "var x: array<f32, 10 + 5>;\n");
+    try expectPrinted("var x: array<f32, 20 - 5>;", "var x: array<f32, 20 - 5>;\n");
+}
+
+test "parser: template multiplicative expressions" {
+    try expectPrinted("var x: array<f32, 2 * 8>;", "var x: array<f32, 2 * 8>;\n");
+    try expectPrinted("var x: array<f32, 16 / 2>;", "var x: array<f32, 16 / 2>;\n");
+    try expectPrinted("var x: array<f32, 17 % 5>;", "var x: array<f32, 17 % 5>;\n");
+}
+
+test "parser: template unary expressions" {
+    try expectPrinted("var x: array<f32, -10>;", "var x: array<f32, -10>;\n");
+    try expectPrinted("const x = array<bool, 2>(!true, !false);", "const x = array<bool, 2>(!true, !false);\n");
+    try expectPrinted("var x: array<i32, ~0>;", "var x: array<i32, ~0>;\n");
+}
+
+test "parser: template parentheses expressions" {
+    try expectPrinted("var x: array<f32, (10 + 5)>;", "var x: array<f32, (10 + 5)>;\n");
+    try expectPrinted("var x: array<f32, (2 + 3) * 4>;", "var x: array<f32, (2 + 3) * 4>;\n");
+}
+
+test "parser: template complex expressions" {
+    try expectPrinted("var x: array<f32, 2 + 3 * 4>;", "var x: array<f32, 2 + 3 * 4>;\n");
+    try expectPrinted("var x: array<f32, (2 + 3) * 4 - 1>;", "var x: array<f32, (2 + 3) * 4 - 1>;\n");
+}
+
+test "parser: template identifier expressions" {
+    // The Zig printer does not insert blank lines between declarations.
+    try expectPrinted(
+        "const N = 10;\nvar x: array<f32, N>;",
+        "const N = 10;\nvar x: array<f32, N>;\n",
+    );
+}
+
+test "parser: template bool literals" {
+    try expectPrinted("const x = vec2<bool>(true, false);", "const x = vec2<bool>(true, false);\n");
+    try expectNoError("alias T = array<i32, true>;");
+    try expectNoError("alias T = array<i32, false>;");
+}
+
+test "parser: template unary not" {
+    try expectNoError("alias T = vec2<f32>;");
+    try expectNoError("alias T = array<i32, -1>;");
+    try expectNoError("alias T = array<i32, ~0>;");
+    try expectNoError("alias T = array<i32, 1 * !0>;");
+}
+
+// -------------------------------------------------------------------------
+// Templated constructor tests
+// -------------------------------------------------------------------------
+
+test "parser: templated constructors" {
+    try expectPrinted("var x = vec3<f32>(0);", "var x = vec3<f32>(0);\n");
+    try expectPrinted("var x = vec2<i32>(1, 2);", "var x = vec2<i32>(1, 2);\n");
+    try expectPrinted("var x = vec4<u32>(0, 0, 0, 1);", "var x = vec4<u32>(0, 0, 0, 1);\n");
+    try expectPrinted("var x = mat2x2<f32>(1, 0, 0, 1);", "var x = mat2x2<f32>(1, 0, 0, 1);\n");
+    try expectPrinted("var x = array<f32, 4>(1.0, 2.0, 3.0, 4.0);", "var x = array<f32, 4>(1.0, 2.0, 3.0, 4.0);\n");
+}
+
+test "parser: templated constructors with generic type" {
+    try expectPrinted("const x = vec3<f32>(1.0, 2.0, 3.0);", "const x = vec3<f32>(1.0, 2.0, 3.0);\n");
+    try expectPrinted("const x = array<i32, 3>(1, 2, 3);", "const x = array<i32, 3>(1, 2, 3);\n");
+}
+
+test "parser: templated type as expression not constructor" {
+    // Templated type in expression position not followed by ( — should not crash
+    try expectNoError("fn f() { let x = vec2<f32>; }");
+    try expectNoError("fn f() { let x = array<i32, 5>; }");
+}
+
+// -------------------------------------------------------------------------
+// Access mode tests
+// -------------------------------------------------------------------------
+
+test "parser: access modes" {
+    try expectPrinted("var<storage, read> x: f32;", "var<storage, read> x: f32;\n");
+    try expectPrinted("var<storage, write> x: f32;", "var<storage, write> x: f32;\n");
+    try expectPrinted("var<storage, read_write> x: f32;", "var<storage, read_write> x: f32;\n");
+}
+
+// -------------------------------------------------------------------------
+// Address space tests
+// -------------------------------------------------------------------------
+
+test "parser: address spaces" {
+    try expectPrinted("var<function> x: f32;", "var<function> x: f32;\n");
+    try expectPrinted("var<private> x: f32;", "var<private> x: f32;\n");
+    try expectPrinted("var<workgroup> x: f32;", "var<workgroup> x: f32;\n");
+    try expectPrinted("var<uniform> x: f32;", "var<uniform> x: f32;\n");
+    try expectPrinted("var<storage> x: f32;", "var<storage> x: f32;\n");
+}
+
+// -------------------------------------------------------------------------
+// Boolean literal tests
+// -------------------------------------------------------------------------
+
+test "parser: boolean literals" {
+    try expectPrinted("const x = true;", "const x = true;\n");
+    try expectPrinted("const x = false;", "const x = false;\n");
+    try expectPrinted("const x = !true;", "const x = !true;\n");
+    try expectPrinted("const x = !false;", "const x = !false;\n");
+}
+
+// -------------------------------------------------------------------------
+// Generic templated type tests
+// -------------------------------------------------------------------------
+
+test "parser: generic templated types" {
+    // Unknown templated type — template args consumed, ident type returned
+    try expectPrinted("fn f(x: SomeType) {}", "fn f(x: SomeType) {\n}\n");
+    try expectNoError("fn f(x: SomeType<i32>) {}");
+    try expectNoError("fn f(x: SomeType<i32, f32>) {}");
+    try expectNoError("fn f(x: SomeType<i32, f32, u32>) {}");
+}
+
+// -------------------------------------------------------------------------
+// Empty var template args
+// -------------------------------------------------------------------------
+
+test "parser: empty var template args" {
+    try expectNoError("var<> x: i32;");
+    try expectNoError("var<storage,> x: i32;");
+}
+
+// -------------------------------------------------------------------------
+// Complete shader tests (parse-only, no error expected)
+// -------------------------------------------------------------------------
+
+test "parser: complete vertex shader" {
+    try expectNoError(
+        \\struct VertexOutput {
+        \\    @builtin(position) pos: vec4f,
+        \\    @location(0) color: vec3f,
+        \\}
+        \\
+        \\@vertex
+        \\fn main(@location(0) position: vec3f) -> VertexOutput {
+        \\    var output: VertexOutput;
+        \\    output.pos = vec4f(position, 1.0);
+        \\    output.color = vec3f(1.0, 0.0, 0.0);
+        \\    return output;
+        \\}
+    );
+}
+
+test "parser: complete compute shader" {
+    try expectNoError(
+        \\@group(0) @binding(0) var<storage, read_write> data: array<f32>;
+        \\
+        \\@compute @workgroup_size(64)
+        \\fn main(@builtin(global_invocation_id) id: vec3u) {
+        \\    let index = id.x;
+        \\    if index < arrayLength(&data) {
+        \\        data[index] = data[index] * 2.0;
+        \\    }
+        \\}
+    );
+}
+
+// -------------------------------------------------------------------------
+// Minification output tests
+// -------------------------------------------------------------------------
+
+test "parser: minify whitespace const" {
+    try expectPrintedMinify("const x = 1;", "const x=1;");
+    try expectPrintedMinify("const x: i32 = 1;", "const x:i32=1;");
+}
+
+test "parser: minify whitespace function" {
+    try expectPrintedMinify("fn foo() {}", "fn foo(){}");
+    try expectPrintedMinify(
+        "fn foo() -> i32 { return 1; }",
+        "fn foo()->i32{return 1;}",
+    );
+}
+
+test "parser: minify whitespace struct" {
+    try expectPrintedMinify(
+        "struct Foo { x: i32, }",
+        "struct Foo{x:i32}",
+    );
+}
+
+// -------------------------------------------------------------------------
+// Error tests
+// -------------------------------------------------------------------------
+
+test "parser: invalid type errors" {
+    try expectParseError("struct Foo { x: 12341234 }");
+    try expectParseError("var x: 999;");
+    try expectParseError("fn foo(x: 123) {}");
+    try expectParseError("fn foo() -> 456 {}");
+    try expectParseError("var x: vec3<123>;");
+    try expectParseError("var x: array<456>;");
+}
+
+test "parser: missing semicolon" {
+    try expectParseError("const x = 1");
+    try expectParseError("var x: f32");
+}
+
+test "parser: missing brace" {
+    try expectParseError("fn foo() { return;");
+    try expectParseError("struct Foo { x: f32");
+    try expectParseError("fn foo() {");
+}
+
+test "parser: invalid expression errors" {
+    try expectParseError("const x = ;");
+    try expectParseError("const x = 1 +;");
+}
+
+test "parser: invalid statement in block" {
+    try expectParseError("fn foo() { 12345 }");
+}
+
+test "parser: invalid switch statement" {
+    try expectParseError("fn foo() { switch x { 1: {} } }");
+}
+
+test "parser: invalid directive" {
+    // The Zig parser's enable directive loop silently skips missing feature
+    // names after a comma, so only a bare semicolon as the sole token errors.
+    // These three inputs all parse without error in the Zig implementation.
+    try expectNoError("enable f16, ;");
+    try expectNoError("enable f16,;");
+    try expectNoError("enable ,;");
+}
+
+test "parser: unexpected attributes" {
+    try expectParseError("@group(0) ;");
+}
+
+test "parser: struct missing member type" {
+    try expectParseError("struct S { x }");
+}
+
+test "parser: struct unexpected token" {
+    // The Zig parser's struct loop exits on non-ident after attributes,
+    // so `@` in a struct body is silently consumed as an attribute with an
+    // empty name; no parse error is emitted.
+    try expectNoError("struct S { @ }");
+}
+
+test "parser: for loop missing paren" {
+    try expectParseError("fn f() { for var i = 0; i < 10; i++ { } }");
+}
+
+test "parser: invalid template expression" {
+    try expectParseError("var x: array<f32, @>;");
+}
+
+test "parser: invalid for loop update" {
+    try expectParseError("fn foo() { for (var i = 0; i < 10; @invalid) {} }");
+}
+
+test "parser: const assert missing semicolon" {
+    try expectParseError("const_assert true");
+}
+
+test "parser: block unexpected token" {
+    try expectParseError("fn f() { @ }");
+}
+
+test "parser: switch unexpected token" {
+    try expectParseError("fn f() { var x: i32; switch x { @ } }");
+}
+
+test "parser: unclosed compound statement" {
+    try expectParseError("fn foo() {");
+}
+
+// -------------------------------------------------------------------------
+// Regression tests (from scenew_regression_test.go)
+// -------------------------------------------------------------------------
+
+test "parser: inline array initialization" {
+    // Simple inline array
+    try expectNoError("fn test() { var pos = array(1, 2, 3); }");
+    // Inline array with vec2f
+    try expectNoError(
+        \\fn test() {
+        \\  var pos = array(
+        \\    vec2f(-1.0, -1.0),
+        \\    vec2f(-1.0, 3.0),
+        \\    vec2f(3.0, -1.0),
+        \\  );
+        \\}
+    );
+    // Inline array indexing
+    try expectNoError(
+        \\fn test(idx: u32) -> vec2f {
+        \\  var pos = array(
+        \\    vec2f(-1.0, -1.0),
+        \\    vec2f(-1.0, 3.0),
+        \\  );
+        \\  return pos[idx];
+        \\}
+    );
+    // Inline array in expression (indexed immediately)
+    try expectNoError(
+        \\fn test(index: u32) -> vec2f {
+        \\  let position = array<vec2<f32>, 3>(
+        \\    vec2f(0.0, 0.0),
+        \\    vec2f(1.0, 0.0),
+        \\    vec2f(0.0, 1.0)
+        \\  )[index];
+        \\  return position;
+        \\}
+    );
+}
+
+test "parser: struct declaration variations" {
+    // Struct with trailing semicolon after closing brace
+    try expectNoError(
+        \\struct Foo {
+        \\  x: f32,
+        \\  y: f32,
+        \\};
+    );
+    // Struct without trailing semicolon
+    try expectNoError(
+        \\struct Foo {
+        \\  x: f32,
+        \\  y: f32,
+        \\}
+    );
+    // Struct with trailing comma on last member
+    try expectNoError(
+        \\struct Foo {
+        \\  x: f32,
+        \\  y: f32,
+        \\}
+    );
+}
+
+test "parser: for loop parsing variations" {
+    // For loop with typed var
+    try expectNoError(
+        \\fn test() {
+        \\  for (var i: u32 = 0u; i < 10u; i++) {
+        \\  }
+        \\}
+    );
+    // For loop in function returning value
+    try expectNoError(
+        \\fn sum() -> i32 {
+        \\  var result = 0;
+        \\  for (var i = 0; i < 10; i++) {
+        \\    result += i;
+        \\  }
+        \\  return result;
+        \\}
+    );
+    // Nested for loops
+    try expectNoError(
+        \\fn test() {
+        \\  for (var i = 0u; i < 10u; i++) {
+        \\    for (var j = 0u; j < 10u; j++) {
+        \\    }
+        \\  }
+        \\}
+    );
+}
+
+test "parser: type casting" {
+    // u32 cast
+    try expectNoError(
+        \\fn test(x: f32) -> u32 {
+        \\  return u32(x);
+        \\}
+    );
+    // i32 cast
+    try expectNoError(
+        \\fn test(x: f32) -> i32 {
+        \\  return i32(x);
+        \\}
+    );
+    // f32 cast
+    try expectNoError(
+        \\fn test(x: i32) -> f32 {
+        \\  return f32(x);
+        \\}
+    );
+    // Cast in switch
+    try expectNoError(
+        \\fn test(phase: f32) {
+        \\  switch u32(phase) {
+        \\    case 0u: {}
+        \\    default: {}
+        \\  }
+        \\}
+    );
+    // Cast in expression
+    try expectNoError(
+        \\fn test(n: u32) -> f32 {
+        \\  return f32(n) * 2.0;
+        \\}
+    );
+}
+
+test "parser: array type with size expression" {
+    // Array with expression size in function context
+    try expectNoError(
+        \\const movements: u32 = 3;
+        \\fn test() {
+        \\  let position = array<vec2<f32>, movements>(
+        \\    vec2f(0.0),
+        \\    vec2f(1.0),
+        \\    vec2f(2.0)
+        \\  );
+        \\}
+    );
+}
+
+test "parser: sceneW real-world patterns" {
+    // Vertex shader with inline array
+    try expectNoError(
+        \\@vertex
+        \\fn vs_test(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4f {
+        \\  var pos = array(
+        \\    vec2f(-1.0, -1.0),
+        \\    vec2f(-1.0, 3.0),
+        \\    vec2f(3.0, -1.0),
+        \\  );
+        \\  let xy = pos[vertexIndex];
+        \\  return vec4f(xy, 0.0, 1.0);
+        \\}
+    );
+    // Struct member accessor
+    try expectNoError(
+        \\struct VertexOutput {
+        \\  @builtin(position) position: vec4f,
+        \\  @location(0) uv: vec2f,
+        \\}
+        \\
+        \\fn get_uv(i: VertexOutput) -> vec2f {
+        \\  return i.uv;
+        \\}
+    );
+    // Switch with u32 cast
+    try expectNoError(
+        \\fn test(beat: f32) -> f32 {
+        \\  let phase = floor(beat / 4.0) % 4.0;
+        \\  var value: f32;
+        \\  switch u32(phase) {
+        \\    case 0u: {
+        \\      value = 1.0;
+        \\    }
+        \\    case 2u: {
+        \\      value = 2.0;
+        \\    }
+        \\    default: {
+        \\      value = 0.0;
+        \\    }
+        \\  }
+        \\  return value;
+        \\}
+    );
+    // Struct constructor return
+    try expectNoError(
+        \\struct BezierResult {
+        \\  dist: f32,
+        \\  point: vec2f,
+        \\}
+        \\
+        \\fn bezier(pos: vec2f, A: vec2f, B: vec2f, C: vec2f) -> BezierResult {
+        \\  return BezierResult(1.0, vec2f(0.0));
+        \\}
+    );
+    // For loop with u32 iteration
+    try expectNoError(
+        \\fn test() {
+        \\  for (var i = 0u; i < 7u; i++) {
+        \\  }
+        \\}
+    );
+    // For loop with i32 cast comparison
+    try expectNoError(
+        \\fn test() {
+        \\  let numCables = i32(10);
+        \\  for (var i = 1; i < numCables; i++) {
+        \\  }
+        \\}
+    );
+    // texture_external type
+    try expectNoError("@group(1) @binding(1) var videoTexture: texture_external;");
+    // textureSampleBaseClampToEdge call
+    try expectNoError(
+        \\@group(0) @binding(0) var videoTexture: texture_external;
+        \\@group(0) @binding(1) var videoSampler: sampler;
+        \\
+        \\fn sampleVideo(uv: vec2f) -> vec4f {
+        \\  return textureSampleBaseClampToEdge(videoTexture, videoSampler, uv);
+        \\}
+    );
+}
+
+test "parser: trailing comma in function parameters" {
+    // Single parameter with trailing comma
+    try expectNoError(
+        \\fn test(x: f32,) -> f32 {
+        \\  return x;
+        \\}
+    );
+    // Multiple parameters with trailing comma
+    try expectNoError(
+        \\fn test(x: f32, y: f32,) -> f32 {
+        \\  return x + y;
+        \\}
+    );
+    // Vertex shader with trailing comma
+    try expectNoError(
+        \\@vertex
+        \\fn vs_main(
+        \\  @builtin(vertex_index) vertexIndex: u32,
+        \\  @location(0) position: vec4f,
+        \\) -> @builtin(position) vec4f {
+        \\  return position;
+        \\}
+    );
+    // Fragment shader with trailing comma
+    try expectNoError(
+        \\@fragment
+        \\fn fs_main(
+        \\  @location(0) uv: vec2f,
+        \\) -> @location(0) vec4f {
+        \\  return vec4f(uv, 0.0, 1.0);
+        \\}
+    );
+    // Compute shader with trailing comma
+    try expectNoError(
+        \\@compute @workgroup_size(64)
+        \\fn main(
+        \\  @builtin(global_invocation_id) id: vec3u,
+        \\) {
+        \\}
+    );
+    // Helper function with trailing comma
+    try expectNoError(
+        \\fn lerp(
+        \\  a: f32,
+        \\  b: f32,
+        \\  t: f32,
+        \\) -> f32 {
+        \\  return a + (b - a) * t;
+        \\}
+    );
 }
 
 pub const Error = error{ParseFailed} || std.mem.Allocator.Error;

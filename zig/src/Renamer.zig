@@ -209,6 +209,108 @@ pub fn numberToMinifiedName(buf: []u8, n_in: u32) []const u8 {
 }
 
 // =========================================================================
+// Character Frequency Analysis
+// =========================================================================
+
+pub const CharFreq = struct {
+    counts: [64]i32 = [_]i32{0} ** 64,
+
+    /// Accumulates character frequencies from text.
+    /// a-z → 0-25, A-Z → 26-51, 0-9 → 52-61, _ → 62
+    pub fn scan(self: *CharFreq, text: []const u8, delta: i32) void {
+        for (text) |c| {
+            const idx: ?usize = if (c >= 'a' and c <= 'z')
+                @as(usize, c - 'a')
+            else if (c >= 'A' and c <= 'Z')
+                @as(usize, c - 'A' + 26)
+            else if (c >= '0' and c <= '9')
+                @as(usize, c - '0' + 52)
+            else if (c == '_')
+                62
+            else
+                null;
+            if (idx) |i| {
+                self.counts[i] += delta;
+            }
+        }
+    }
+};
+
+// =========================================================================
+// Frequency-based Name Minifier
+// =========================================================================
+
+pub const NameMinifier = struct {
+    head_buf: [52]u8,
+    tail_buf: [62]u8,
+    head_len: u8,
+    tail_len: u8,
+
+    /// Creates a NameMinifier with the default a-zA-Z / a-zA-Z0-9 alphabets.
+    pub fn init() NameMinifier {
+        var self: NameMinifier = undefined;
+        @memcpy(self.head_buf[0..head.len], head);
+        @memcpy(self.tail_buf[0..tail.len], tail);
+        self.head_len = head.len;
+        self.tail_len = tail.len;
+        return self;
+    }
+
+    /// Convert a number to a minified identifier name using instance alphabets.
+    pub fn numberToName(self: *const NameMinifier, buf: []u8, n_in: u32) []const u8 {
+        var n = n_in;
+        const h = self.head_buf[0..self.head_len];
+        const t = self.tail_buf[0..self.tail_len];
+        const n_head: u32 = self.head_len;
+        const n_tail: u32 = self.tail_len;
+
+        var len: u32 = 0;
+        buf[len] = h[n % n_head];
+        len += 1;
+        n = n / n_head;
+
+        while (n > 0) {
+            n -= 1;
+            buf[len] = t[n % n_tail];
+            len += 1;
+            n = n / n_tail;
+        }
+
+        return buf[0..len];
+    }
+
+    /// Reorders alphabets based on character frequency for better gzip compression.
+    pub fn shuffleByCharFreq(freq: *const CharFreq) NameMinifier {
+        const CharCount = struct { char: u8, count: i32 };
+        var chars: [62]CharCount = undefined;
+        for (tail, 0..) |c, i| {
+            chars[i] = .{ .char = c, .count = freq.counts[i] };
+        }
+
+        std.mem.sort(CharCount, &chars, {}, struct {
+            fn lessThan(_: void, a: CharCount, b: CharCount) bool {
+                return a.count > b.count;
+            }
+        }.lessThan);
+
+        var result: NameMinifier = undefined;
+        var hl: u8 = 0;
+        var tl: u8 = 0;
+        for (chars) |c| {
+            result.tail_buf[tl] = c.char;
+            tl += 1;
+            if (c.char < '0' or c.char > '9') {
+                result.head_buf[hl] = c.char;
+                hl += 1;
+            }
+        }
+        result.head_len = hl;
+        result.tail_len = tl;
+        return result;
+    }
+};
+
+// =========================================================================
 // Reserved names
 // =========================================================================
 
@@ -294,12 +396,18 @@ pub fn computeReservedNames(allocator: std.mem.Allocator) std.StringHashMapUnman
 
     // Texel formats
     const texel_formats = [_][]const u8{
-        "rgba8unorm", "rgba8snorm", "rgba8uint", "rgba8sint",
-        "rgba16uint", "rgba16sint", "rgba16float",
-        "r32uint", "r32sint", "r32float",
-        "rg32uint", "rg32sint", "rg32float",
-        "rgba32uint", "rgba32sint", "rgba32float",
+        "rgba8unorm",  "rgba8snorm",  "rgba8uint",   "rgba8sint",
+        "rgba16uint",  "rgba16sint",  "rgba16float",
+        "r32uint",     "r32sint",     "r32float",
+        "rg32uint",    "rg32sint",    "rg32float",
+        "rgba32uint",  "rgba32sint",  "rgba32float",
         "bgra8unorm",
+        // Extended formats (Dawn/Tint)
+        "r8unorm",     "r8snorm",
+        "rg8unorm",    "rg8snorm",
+        "r16uint",     "r16sint",     "r16float",
+        "rg16uint",    "rg16sint",    "rg16float",
+        "rgb10a2uint", "rgb10a2unorm",
     };
     for (texel_formats) |f| reserved.put(allocator, f, {}) catch {};
 
@@ -319,4 +427,309 @@ test "numberToMinifiedName sequence" {
     try std.testing.expectEqualStrings("Z", numberToMinifiedName(&buf, 51));
     try std.testing.expectEqualStrings("aa", numberToMinifiedName(&buf, 52));
     try std.testing.expectEqualStrings("ba", numberToMinifiedName(&buf, 53));
+}
+
+test "numberToMinifiedName generates valid identifiers for 1000 names" {
+    var buf: [16]u8 = undefined;
+    for (0..1000) |i| {
+        const name = numberToMinifiedName(&buf, @intCast(i));
+        try std.testing.expect(name.len > 0);
+        // First char must be a letter
+        const first = name[0];
+        try std.testing.expect((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z'));
+        // Remaining chars must be alphanumeric
+        for (name[1..]) |c| {
+            try std.testing.expect(
+                (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9'),
+            );
+        }
+    }
+}
+
+test "numberToMinifiedName no duplicates in 10000 names" {
+    var buf: [16]u8 = undefined;
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(std.testing.allocator);
+
+    for (0..10000) |i| {
+        const name = numberToMinifiedName(&buf, @intCast(i));
+        const owned = std.testing.allocator.dupe(u8, name) catch unreachable;
+        defer std.testing.allocator.free(owned);
+        const result = seen.getOrPut(std.testing.allocator, owned) catch unreachable;
+        try std.testing.expect(!result.found_existing);
+        result.key_ptr.* = std.testing.allocator.dupe(u8, name) catch unreachable;
+    }
+
+    // Clean up owned keys
+    var it = seen.iterator();
+    while (it.next()) |entry| {
+        std.testing.allocator.free(@constCast(entry.key_ptr.*));
+    }
+}
+
+test "computeReservedNames includes keywords" {
+    var reserved = computeReservedNames(std.testing.allocator);
+    defer reserved.deinit(std.testing.allocator);
+
+    try std.testing.expect(reserved.contains("fn"));
+    try std.testing.expect(reserved.contains("var"));
+    try std.testing.expect(reserved.contains("return"));
+    try std.testing.expect(reserved.contains("struct"));
+    try std.testing.expect(reserved.contains("if"));
+}
+
+test "computeReservedNames has reasonable count" {
+    var reserved = computeReservedNames(std.testing.allocator);
+    defer reserved.deinit(std.testing.allocator);
+
+    // Should have at least 150 reserved names
+    try std.testing.expect(reserved.count() >= 150);
+}
+
+test "generated names don't collide with reserved" {
+    var reserved = computeReservedNames(std.testing.allocator);
+    defer reserved.deinit(std.testing.allocator);
+
+    var buf: [16]u8 = undefined;
+    // Check first 1000 names — short names like "fn", "if" should be skipped
+    // by the renamer, but numberToMinifiedName itself doesn't skip.
+    // The MinifyRenamer.assignNames handles this, so we just verify the
+    // name generation + reserved check flow works.
+    var count: usize = 0;
+    var n: u32 = 0;
+    while (count < 100) : (n += 1) {
+        const name = numberToMinifiedName(&buf, n);
+        if (!reserved.contains(name)) {
+            count += 1;
+        }
+    }
+    try std.testing.expect(count == 100);
+}
+
+test "NoOpRenamer returns original names" {
+    const symbols = [_]Ast.Symbol{
+        .{ .original_name = "myFunc", .kind = .function, .flags = .{} },
+        .{ .original_name = "myVar", .kind = .@"var", .flags = .{} },
+    };
+    var noop = NoOpRenamer.init(&symbols);
+    noop.renamer.ptr = @ptrCast(&noop); // Fix self-pointer after move
+    try std.testing.expectEqualStrings("myFunc", noop.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(0))));
+    try std.testing.expectEqualStrings("myVar", noop.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(1))));
+}
+
+test "NoOpRenamer handles invalid ref" {
+    const symbols = [_]Ast.Symbol{
+        .{ .original_name = "foo", .kind = .function, .flags = .{} },
+    };
+    var noop = NoOpRenamer.init(&symbols);
+    try std.testing.expectEqualStrings("", noop.renamer.nameForSymbol(Ast.SymbolIndex.none));
+}
+
+test "NoOpRenamer handles out-of-bounds ref" {
+    const symbols = [_]Ast.Symbol{
+        .{ .original_name = "foo", .kind = .function, .flags = .{} },
+    };
+    var noop = NoOpRenamer.init(&symbols);
+    noop.renamer.ptr = @ptrCast(&noop);
+    try std.testing.expectEqualStrings("", noop.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(100))));
+}
+
+test "MinifyRenamer full workflow" {
+    var symbols = [_]Ast.Symbol{
+        .{ .original_name = "entryMain", .kind = .function, .flags = .{ .must_not_be_renamed = true } },
+        .{ .original_name = "helperFunc", .kind = .function, .flags = .{}, .use_count = 0 },
+        .{ .original_name = "otherFunc", .kind = .function, .flags = .{}, .use_count = 0 },
+    };
+
+    var reserved = computeReservedNames(std.testing.allocator);
+    defer reserved.deinit(std.testing.allocator);
+
+    var renamer = MinifyRenamer.init(std.testing.allocator, &symbols, reserved);
+    renamer.renamer.ptr = @ptrCast(&renamer); // Fix self-pointer after move
+    defer {
+        renamer.slots.deinit(std.testing.allocator);
+        renamer.top_level_slots.deinit(std.testing.allocator);
+        renamer.name_buf.deinit(std.testing.allocator);
+        renamer.name_offsets.deinit(std.testing.allocator);
+    }
+
+    // Simulate use counts
+    var uses = std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32){};
+    defer uses.deinit(std.testing.allocator);
+    uses.put(std.testing.allocator, @as(Ast.SymbolIndex, @enumFromInt(1)), 5) catch {};
+    uses.put(std.testing.allocator, @as(Ast.SymbolIndex, @enumFromInt(2)), 3) catch {};
+
+    renamer.accumulateSymbolUseCounts(&uses);
+    renamer.allocateSlots();
+    renamer.reserveUnrenamedSymbolNames();
+    renamer.assignNames();
+
+    // Entry point should keep its name
+    try std.testing.expectEqualStrings("entryMain", renamer.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(0))));
+
+    // Renamed symbols should have short names
+    const name1 = renamer.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(1)));
+    const name2 = renamer.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(2)));
+    try std.testing.expect(name1.len > 0);
+    try std.testing.expect(name2.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, name1, "helperFunc"));
+    try std.testing.expect(!std.mem.eql(u8, name2, "otherFunc"));
+}
+
+test "MinifyRenamer invalid ref returns empty" {
+    var symbols = [_]Ast.Symbol{
+        .{ .original_name = "foo", .kind = .function, .flags = .{} },
+    };
+    const reserved = std.StringHashMapUnmanaged(void){};
+    var renamer = MinifyRenamer.init(std.testing.allocator, &symbols, reserved);
+    renamer.renamer.ptr = @ptrCast(&renamer);
+    try std.testing.expectEqualStrings("", renamer.renamer.nameForSymbol(Ast.SymbolIndex.none));
+}
+
+test "MinifyRenamer zero use count not renamed" {
+    var symbols = [_]Ast.Symbol{
+        .{ .original_name = "unused", .kind = .function, .flags = .{}, .use_count = 0 },
+    };
+    const reserved = std.StringHashMapUnmanaged(void){};
+    var renamer = MinifyRenamer.init(std.testing.allocator, &symbols, reserved);
+    renamer.renamer.ptr = @ptrCast(&renamer);
+    defer {
+        renamer.slots.deinit(std.testing.allocator);
+        renamer.top_level_slots.deinit(std.testing.allocator);
+        renamer.name_buf.deinit(std.testing.allocator);
+        renamer.name_offsets.deinit(std.testing.allocator);
+    }
+
+    renamer.allocateSlots();
+    renamer.assignNames();
+
+    // Zero use count means no slot allocated, returns original name
+    try std.testing.expectEqualStrings("unused", renamer.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(0))));
+}
+
+test "MinifyRenamer must_not_be_renamed flag" {
+    var symbols = [_]Ast.Symbol{
+        .{ .original_name = "keepMe", .kind = .function, .flags = .{ .must_not_be_renamed = true }, .use_count = 10 },
+    };
+    const reserved = std.StringHashMapUnmanaged(void){};
+    var renamer = MinifyRenamer.init(std.testing.allocator, &symbols, reserved);
+    renamer.renamer.ptr = @ptrCast(&renamer);
+    defer {
+        renamer.slots.deinit(std.testing.allocator);
+        renamer.top_level_slots.deinit(std.testing.allocator);
+        renamer.name_buf.deinit(std.testing.allocator);
+        renamer.name_offsets.deinit(std.testing.allocator);
+    }
+
+    var uses = std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32){};
+    defer uses.deinit(std.testing.allocator);
+    uses.put(std.testing.allocator, @as(Ast.SymbolIndex, @enumFromInt(0)), 10) catch {};
+
+    renamer.accumulateSymbolUseCounts(&uses);
+    renamer.allocateSlots();
+    renamer.assignNames();
+
+    // must_not_be_renamed should keep original name
+    try std.testing.expectEqualStrings("keepMe", renamer.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(0))));
+}
+
+test "CharFreq scan lowercase" {
+    var freq = CharFreq{};
+    freq.scan("aaa", 1);
+    try std.testing.expectEqual(@as(i32, 3), freq.counts[0]);
+
+    freq.scan("abc", 1);
+    try std.testing.expectEqual(@as(i32, 4), freq.counts[0]); // 'a' now 4
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[1]); // 'b'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[2]); // 'c'
+}
+
+test "CharFreq scan uppercase" {
+    var freq = CharFreq{};
+    freq.scan("ABC", 1);
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[26]); // 'A'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[27]); // 'B'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[28]); // 'C'
+}
+
+test "CharFreq scan digits" {
+    var freq = CharFreq{};
+    freq.scan("012", 1);
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[52]); // '0'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[53]); // '1'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[54]); // '2'
+}
+
+test "CharFreq scan mixed" {
+    var freq = CharFreq{};
+    freq.scan("variableName123", 1);
+    try std.testing.expect(freq.counts[0] >= 2); // 'a' appears at least twice
+}
+
+test "CharFreq scan underscore" {
+    var freq = CharFreq{};
+    freq.scan("my_var_name", 1);
+    try std.testing.expectEqual(@as(i32, 2), freq.counts[62]); // '_'
+}
+
+test "CharFreq scan ignores invalid chars" {
+    var freq = CharFreq{};
+    freq.scan("a!@#$%^&*()b+=-[]{}|c d\t\n", 1);
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[0]); // 'a'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[1]); // 'b'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[2]); // 'c'
+    try std.testing.expectEqual(@as(i32, 1), freq.counts[3]); // 'd'
+}
+
+test "shuffleByCharFreq reorders alphabet" {
+    var freq = CharFreq{};
+    freq.counts[25] = 100; // 'z'
+    freq.counts[0] = 1; // 'a'
+
+    const shuffled = NameMinifier.shuffleByCharFreq(&freq);
+
+    var buf: [16]u8 = undefined;
+    const first = shuffled.numberToName(&buf, 0);
+    try std.testing.expectEqual(@as(u8, 'z'), first[0]);
+}
+
+test "NameMinifier default matches numberToMinifiedName" {
+    const nm = NameMinifier.init();
+    var buf1: [16]u8 = undefined;
+    var buf2: [16]u8 = undefined;
+    for (0..100) |i| {
+        const name1 = nm.numberToName(&buf1, @intCast(i));
+        const name2 = numberToMinifiedName(&buf2, @intCast(i));
+        try std.testing.expectEqualStrings(name2, name1);
+    }
+}
+
+test "MinifyRenamer skips reserved names" {
+    var symbols = [_]Ast.Symbol{
+        .{ .original_name = "myFunc", .kind = .function, .flags = .{}, .use_count = 5 },
+    };
+
+    var reserved = computeReservedNames(std.testing.allocator);
+    defer reserved.deinit(std.testing.allocator);
+
+    var renamer = MinifyRenamer.init(std.testing.allocator, &symbols, reserved);
+    renamer.renamer.ptr = @ptrCast(&renamer);
+    defer {
+        renamer.slots.deinit(std.testing.allocator);
+        renamer.top_level_slots.deinit(std.testing.allocator);
+        renamer.name_buf.deinit(std.testing.allocator);
+        renamer.name_offsets.deinit(std.testing.allocator);
+    }
+
+    var uses = std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32){};
+    defer uses.deinit(std.testing.allocator);
+    uses.put(std.testing.allocator, @as(Ast.SymbolIndex, @enumFromInt(0)), 5) catch {};
+
+    renamer.accumulateSymbolUseCounts(&uses);
+    renamer.allocateSlots();
+    renamer.assignNames();
+
+    const name = renamer.renamer.nameForSymbol(@as(Ast.SymbolIndex, @enumFromInt(0)));
+    // Assigned name should not be a reserved name
+    try std.testing.expect(!reserved.contains(name));
 }

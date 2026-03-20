@@ -447,3 +447,154 @@ test "compute.toys semantic: spaced.wgsl" {
     defer arena.deinit();
     try testComputeToysShader(arena.allocator(), ct_spaced_wgsl);
 }
+
+// =========================================================================
+// Entry point name preservation tests (from Go samples_test.go)
+// =========================================================================
+
+fn testPreservesEntryPointNames(allocator: std.mem.Allocator, source_bytes: []const u8, entry_points: []const []const u8) !void {
+    const source = try makeSentinel(allocator, source_bytes);
+    const result = try miniray.minifyWithOptions(allocator, source, .{
+        .minify_whitespace = true,
+        .minify_identifiers = true,
+        .minify_syntax = true,
+        .tree_shaking = false,
+    });
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    for (entry_points) |ep| {
+        // Check for "fn <name>" in minified output
+        var found = false;
+        var i: usize = 0;
+        while (i + 3 + ep.len <= result.code.len) : (i += 1) {
+            if (std.mem.startsWith(u8, result.code[i..], "fn ")) {
+                if (i + 3 + ep.len <= result.code.len and std.mem.eql(u8, result.code[i + 3 ..][0..ep.len], ep)) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            std.debug.print("entry point '{s}' not found in minified output\n", .{ep});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "preserves entry points: example.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesEntryPointNames(arena.allocator(), example_wgsl, &.{ "vertexMain", "fragmentMain", "computeMain" });
+}
+
+test "preserves entry points: basic_vert.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesEntryPointNames(arena.allocator(), basic_vert_wgsl, &.{"main"});
+}
+
+test "preserves entry points: fullscreen_quad.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesEntryPointNames(arena.allocator(), fullscreen_quad_wgsl, &.{ "vert_main", "frag_main" });
+}
+
+test "preserves entry points: shadow_fragment.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesEntryPointNames(arena.allocator(), shadow_fragment_wgsl, &.{"main"});
+}
+
+// =========================================================================
+// Binding count preservation tests (from Go samples_test.go)
+// =========================================================================
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) {
+        if (std.mem.eql(u8, haystack[i..][0..needle.len], needle)) {
+            n += 1;
+            i += needle.len;
+        } else {
+            i += 1;
+        }
+    }
+    return n;
+}
+
+fn testPreservesBindingCount(allocator: std.mem.Allocator, source_bytes: []const u8) !void {
+    const source = try makeSentinel(allocator, source_bytes);
+    const result = try miniray.minifyWithOptions(allocator, source, .{
+        .minify_whitespace = true,
+        .minify_identifiers = true,
+        .minify_syntax = true,
+        .tree_shaking = false,
+    });
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    const source_bindings = countOccurrences(source_bytes, "@binding");
+    const minified_bindings = countOccurrences(result.code, "@binding");
+    try std.testing.expectEqual(source_bindings, minified_bindings);
+    const source_groups = countOccurrences(source_bytes, "@group");
+    const minified_groups = countOccurrences(result.code, "@group");
+    try std.testing.expectEqual(source_groups, minified_groups);
+}
+
+test "preserves bindings: example.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBindingCount(arena.allocator(), example_wgsl);
+}
+
+test "preserves bindings: basic_vert.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBindingCount(arena.allocator(), basic_vert_wgsl);
+}
+
+test "preserves bindings: fullscreen_quad.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBindingCount(arena.allocator(), fullscreen_quad_wgsl);
+}
+
+test "preserves bindings: shadow_fragment.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBindingCount(arena.allocator(), shadow_fragment_wgsl);
+}
+
+// =========================================================================
+// Builtin count preservation tests (from Go samples_test.go)
+// =========================================================================
+
+fn testPreservesBuiltinCount(allocator: std.mem.Allocator, source_bytes: []const u8) !void {
+    const source = try makeSentinel(allocator, source_bytes);
+    const result = try miniray.minifyWithOptions(allocator, source, .{
+        .minify_whitespace = true,
+        .minify_identifiers = true,
+        .minify_syntax = true,
+        .tree_shaking = false,
+    });
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    const source_builtins = countOccurrences(source_bytes, "@builtin");
+    const minified_builtins = countOccurrences(result.code, "@builtin");
+    try std.testing.expectEqual(source_builtins, minified_builtins);
+}
+
+test "preserves builtins: basic_vert.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBuiltinCount(arena.allocator(), basic_vert_wgsl);
+}
+
+test "preserves builtins: fullscreen_quad.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBuiltinCount(arena.allocator(), fullscreen_quad_wgsl);
+}
+
+test "preserves builtins: blur.wgsl" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testPreservesBuiltinCount(arena.allocator(), blur_wgsl);
+}
