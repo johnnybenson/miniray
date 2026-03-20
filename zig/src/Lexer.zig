@@ -329,8 +329,6 @@ pub fn tokenize(allocator: std.mem.Allocator, source: [:0]const u8) !std.MultiAr
 
     while (true) {
         const tag = lex.next();
-        const start = lex.tokens.len; // We'll store start below
-        _ = start;
         try lex.tokens.append(allocator, .{ .tag = tag.tag, .start = tag.start });
         if (tag.tag == .eof or tag.tag == .@"error") break;
     }
@@ -750,6 +748,37 @@ test "tokenize keywords" {
     try std.testing.expectEqual(Tag.keyword_var, tags[1]);
     try std.testing.expectEqual(Tag.keyword_let, tags[2]);
     try std.testing.expectEqual(Tag.keyword_fn, tags[3]);
+}
+
+test "fuzz lexer no crash" {
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            @disableInstrumentation();
+            var buf: [256]u8 = undefined;
+            const len = smith.slice(buf[0 .. buf.len - 1]);
+            buf[len] = 0;
+            const source: [:0]const u8 = buf[0..len :0];
+            var tokens = tokenize(std.testing.allocator, source) catch return;
+            defer tokens.deinit(std.testing.allocator);
+            // Verify all token starts are within source bounds
+            for (tokens.items(.start)) |start| {
+                try std.testing.expect(start <= source.len);
+            }
+            // Last token must be eof or error
+            const tags = tokens.items(.tag);
+            if (tags.len > 0) {
+                const last = tags[tags.len - 1];
+                try std.testing.expect(last == .eof or last == .@"error");
+            }
+        }
+    }.testOne, .{
+        .corpus = &.{
+            "fn main() {}",
+            "/* nested /* comment */ */",
+            "var<storage, read_write> x: f32 = 1.0;",
+            "++--&&||<<>>",
+        },
+    });
 }
 
 test "tokenize numbers" {

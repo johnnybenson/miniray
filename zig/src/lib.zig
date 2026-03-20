@@ -5,6 +5,13 @@
 const std = @import("std");
 const Minifier = @import("Minifier.zig");
 
+const OPT_MINIFY_WHITESPACE: u32 = 1 << 0;
+const OPT_MINIFY_IDENTIFIERS: u32 = 1 << 1;
+const OPT_MINIFY_SYNTAX: u32 = 1 << 2;
+const OPT_TREE_SHAKING: u32 = 1 << 3;
+const OPT_MANGLE_EXTERNAL: u32 = 1 << 4;
+const OPT_PRESERVE_UNIFORM_STRUCTS: u32 = 1 << 5;
+
 /// Result from minification. Caller must call miniray_free_result.
 pub const MinirayResult = extern struct {
     code_ptr: ?[*]const u8,
@@ -29,12 +36,12 @@ export fn miniray_minify_c(
     const source: [:0]const u8 = source_buf[0..source_len :0];
 
     const options = Minifier.Options{
-        .minify_whitespace = flags & 1 != 0,
-        .minify_identifiers = flags & 2 != 0,
-        .minify_syntax = flags & 4 != 0,
-        .tree_shaking = flags & 8 != 0,
-        .mangle_external_bindings = flags & 16 != 0,
-        .preserve_uniform_struct_types = flags & 32 != 0,
+        .minify_whitespace = flags & OPT_MINIFY_WHITESPACE != 0,
+        .minify_identifiers = flags & OPT_MINIFY_IDENTIFIERS != 0,
+        .minify_syntax = flags & OPT_MINIFY_SYNTAX != 0,
+        .tree_shaking = flags & OPT_TREE_SHAKING != 0,
+        .mangle_external_bindings = flags & OPT_MANGLE_EXTERNAL != 0,
+        .preserve_uniform_struct_types = flags & OPT_PRESERVE_UNIFORM_STRUCTS != 0,
     };
 
     const result = Minifier.minify(allocator, source, options) catch return .{ .code_ptr = null, .code_len = 0, .error = true };

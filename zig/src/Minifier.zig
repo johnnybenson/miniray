@@ -11,6 +11,8 @@ const RenamerMod = @import("Renamer.zig");
 const Dce = @import("Dce.zig");
 const SourceMap = @import("SourceMap.zig");
 
+const Reflect = @import("Reflect.zig");
+
 const Minifier = @This();
 
 pub const SourceMapOptions = struct {
@@ -41,6 +43,7 @@ pub const Result = struct {
     source_map: ?SourceMap.Result = null,
 };
 
+/// Returns default minification options (all minification enabled).
 pub fn defaultOptions() Options {
     return .{};
 }
@@ -100,21 +103,136 @@ pub fn minify(allocator: std.mem.Allocator, source: [:0]const u8, options: Optio
     }
 
     // 7. Set up source map generator if requested
-    var source_map_gen: ?*SourceMap.Generator = null;
-    if (options.generate_source_map) {
-        const gen = try allocator.create(SourceMap.Generator);
-        gen.* = SourceMap.Generator.init(allocator, source);
-        gen.setFile(options.source_map_options.file);
-        gen.setSourceName(options.source_map_options.source_name);
-        gen.setIncludeSource(options.source_map_options.include_source);
-        source_map_gen = gen;
-    }
+    const source_map_gen = try initSourceMapGen(allocator, source, options);
 
     // 8. Create renamer and print
+    const print_result = try printWithRenamer(allocator, module, options, &uses, reserved, source_map_gen);
+    result.code = print_result.code;
+
+    // 9. Finalize source map
+    if (source_map_gen) |gen| {
+        result.source_map = gen.generate();
+    }
+
+    result.minified_size = result.code.len;
+    result.symbols_total = module.symbols.items.len;
+    return result;
+}
+
+pub const MinifyAndReflectResult = struct {
+    minify: Result,
+    reflect: Reflect.ReflectResult,
+};
+
+/// Minify and reflect in a single pass, sharing the parsed module and renamer.
+/// Reflection uses the minified names so callers can map bindings to the
+/// minified output.
+pub fn minifyAndReflect(allocator: std.mem.Allocator, source: [:0]const u8, options: Options) !MinifyAndReflectResult {
+    var result = MinifyAndReflectResult{
+        .minify = .{
+            .code = "",
+            .errors = &.{},
+            .original_size = source.len,
+            .minified_size = 0,
+            .symbols_total = 0,
+            .symbols_dead = 0,
+        },
+        .reflect = .{},
+    };
+
+    // 1. Tokenize
+    var tokens = try Lexer.tokenize(allocator, source);
+    defer tokens.deinit(allocator);
+
+    // 2. Parse
+    var parser = Parser.init(allocator, source, tokens);
+    const module = parser.parse() catch {
+        result.minify.code = source;
+        result.minify.minified_size = source.len;
+        result.minify.errors = parser.errors.items;
+        for (parser.errors.items) |err| {
+            result.reflect.errors.append(allocator, err.message) catch {};
+        }
+        return result;
+    };
+
+    if (parser.errors.items.len > 0) {
+        result.minify.code = source;
+        result.minify.minified_size = source.len;
+        result.minify.errors = parser.errors.items;
+        for (parser.errors.items) |err| {
+            result.reflect.errors.append(allocator, err.message) catch {};
+        }
+        return result;
+    }
+
+    // 3–6. Mark API-facing, DCE, compute usage, build reserved names
+    markAPIFacingSymbols(module, options);
+
+    if (options.tree_shaking) {
+        result.minify.symbols_dead = Dce.mark(allocator, module);
+    } else {
+        for (module.symbols.items) |*sym| {
+            sym.flags.is_live = true;
+        }
+    }
+
+    var uses = computeSymbolUsage(allocator, module);
+    defer uses.deinit(allocator);
+
+    var reserved = RenamerMod.computeReservedNames(allocator);
+    for (options.keep_names) |name| {
+        reserved.put(allocator, name, {}) catch {};
+    }
+
+    // 7. Source map
+    const source_map_gen = try initSourceMapGen(allocator, source, options);
+
+    // 8. Create renamer and print
+    const print_result = try printWithRenamer(allocator, module, options, &uses, reserved, source_map_gen);
+    result.minify.code = print_result.code;
+
+    // 9. Finalize source map
+    if (source_map_gen) |gen| {
+        result.minify.source_map = gen.generate();
+    }
+
+    result.minify.minified_size = result.minify.code.len;
+    result.minify.symbols_total = module.symbols.items.len;
+
+    // 10. Reflect using the same module and renamer
+    result.reflect = Reflect.reflectWithRenamer(allocator, module, print_result.renamer);
+
+    return result;
+}
+
+fn initSourceMapGen(allocator: std.mem.Allocator, source: [:0]const u8, options: Options) !?*SourceMap.Generator {
+    if (!options.generate_source_map) return null;
+    const gen = try allocator.create(SourceMap.Generator);
+    gen.* = SourceMap.Generator.init(allocator, source);
+    gen.setFile(options.source_map_options.file);
+    gen.setSourceName(options.source_map_options.source_name);
+    gen.setIncludeSource(options.source_map_options.include_source);
+    return gen;
+}
+
+const PrintResult = struct {
+    code: []const u8,
+    renamer: *const Printer.Renamer,
+};
+
+fn printWithRenamer(
+    allocator: std.mem.Allocator,
+    module: *Ast.Module,
+    options: Options,
+    uses: *const std.AutoHashMapUnmanaged(Ast.SymbolIndex, u32),
+    reserved: std.StringHashMapUnmanaged(void),
+    source_map_gen: ?*SourceMap.Generator,
+) !PrintResult {
     if (options.minify_identifiers) {
         const min_renamer = try allocator.create(RenamerMod.MinifyRenamer);
         min_renamer.* = RenamerMod.MinifyRenamer.init(allocator, module.symbols.items, reserved);
-        min_renamer.accumulateSymbolUseCounts(&uses);
+        min_renamer.accumulateSymbolUseCounts(uses);
         min_renamer.allocateSlots();
         min_renamer.reserveUnrenamedSymbolNames();
         min_renamer.assignNames();
@@ -123,14 +241,13 @@ pub fn minify(allocator: std.mem.Allocator, source: [:0]const u8, options: Optio
 
         var printer = Printer.init(allocator, .{
             .minify_whitespace = options.minify_whitespace,
-            .minify_identifiers = options.minify_identifiers,
+            .minify_identifiers = true,
             .minify_syntax = options.minify_syntax,
             .tree_shaking = options.tree_shaking,
             .renamer = &min_renamer.renamer,
             .source_map_gen = source_map_gen,
         }, module.symbols.items);
-
-        result.code = try printer.print(module);
+        return .{ .code = try printer.print(module), .renamer = &min_renamer.renamer };
     } else {
         const noop = try allocator.create(RenamerMod.NoOpRenamer);
         noop.* = RenamerMod.NoOpRenamer.init(module.symbols.items);
@@ -145,26 +262,11 @@ pub fn minify(allocator: std.mem.Allocator, source: [:0]const u8, options: Optio
             .renamer = &noop.renamer,
             .source_map_gen = source_map_gen,
         }, module.symbols.items);
-
-        result.code = try printer.print(module);
+        return .{ .code = try printer.print(module), .renamer = &noop.renamer };
     }
-
-    // 9. Finalize source map
-    if (source_map_gen) |gen| {
-        result.source_map = gen.generate();
-    }
-
-    result.minified_size = result.code.len;
-    result.symbols_total = module.symbols.items.len;
-    return result;
 }
 
 fn markAPIFacingSymbols(module: *Ast.Module, options: Options) void {
-    // Build keep names set
-    var keep_set: std.StringHashMapUnmanaged(void) = .empty;
-    // We don't have the allocator here easily, but we can just check inline
-    _ = &keep_set;
-
     for (module.symbols.items) |*sym| {
         if (sym.flags.is_entry_point) sym.flags.must_not_be_renamed = true;
         if (sym.kind == .builtin) sym.flags.must_not_be_renamed = true;
@@ -308,5 +410,22 @@ fn countStmtUsage(allocator: std.mem.Allocator, stmt: Ast.Stmt, uses: *std.AutoH
         },
         .decl => |s| countDeclUsage(allocator, s.decl, uses),
         .@"break", .@"continue", .discard => {},
+    }
+}
+
+test "minify OOM returns error" {
+    const source: [:0]const u8 = "fn main() { let x = 1; }";
+    // Iterate through allocation failure points
+    for (0..50) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_at,
+        });
+        const result = minify(failing.allocator(), source, .{});
+        if (result) |_| {
+            // If it succeeds, we've exhausted failure points
+            break;
+        } else |_| {
+            // Expected: OOM error propagated, no crash
+        }
     }
 }

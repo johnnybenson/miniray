@@ -34,22 +34,28 @@ pub fn validate(allocator: @import("std").mem.Allocator, source: [:0]const u8) !
 
 /// Validate WGSL source with custom options.
 pub fn validateWithOptions(allocator: @import("std").mem.Allocator, source: [:0]const u8, options: Validator.Options) !Validator.Result {
-    var tokens = try Lexer.tokenize(allocator, source);
-    _ = &tokens;
+    const tokens = try Lexer.tokenize(allocator, source);
     var parser = Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         const diags = try allocator.create(Diagnostic);
         diags.* = Diagnostic.init(allocator, source);
-        diags.addError(allocator, 0, "parse error");
+        for (parser.errors.items) |err| {
+            diags.addError(allocator, err.pos, err.message);
+        }
         return .{ .valid = false, .diagnostics = diags };
     };
     return Validator.validate(allocator, module, options);
 }
 
+/// Minify and reflect in a single pass. The reflection result uses the
+/// minified names, so callers can map bindings to the minified output.
+pub fn minifyAndReflect(allocator: @import("std").mem.Allocator, source: [:0]const u8, options: Minifier.Options) !Minifier.MinifyAndReflectResult {
+    return Minifier.minifyAndReflect(allocator, source, options);
+}
+
 /// Reflect WGSL source (extract bindings, layouts, entry points).
 pub fn reflect(allocator: @import("std").mem.Allocator, source: [:0]const u8) !Reflect.ReflectResult {
-    var tokens = try Lexer.tokenize(allocator, source);
-    _ = &tokens;
+    const tokens = try Lexer.tokenize(allocator, source);
     var parser = Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         var result = Reflect.ReflectResult{};

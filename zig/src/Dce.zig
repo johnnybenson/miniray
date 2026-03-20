@@ -46,8 +46,10 @@ pub fn mark(allocator: std.mem.Allocator, module: *Ast.Module) u32 {
         queue.append(allocator, ep) catch {};
     }
 
-    while (queue.items.len > 0) {
-        const idx = queue.orderedRemove(0);
+    var head: usize = 0;
+    while (head < queue.items.len) {
+        const idx = queue.items[head];
+        head += 1;
         if (visited.contains(idx)) continue;
         visited.put(allocator, idx, {}) catch {};
 

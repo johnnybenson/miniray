@@ -12,7 +12,9 @@ const Lexer = @import("Lexer.zig");
 // Symbols and References
 // =========================================================================
 
-/// Index into the symbol table. `none` matches Go's InvalidRef().
+/// Index into the symbol table. Uses `none = maxInt(u32)` as sentinel,
+/// avoiding Go's zero-value bug where `Ref{0,0}` passes `IsValid()`.
+/// Always check `isValid()` before calling `index()`.
 pub const SymbolIndex = enum(u32) {
     none = std.math.maxInt(u32),
     _,
@@ -21,6 +23,7 @@ pub const SymbolIndex = enum(u32) {
         return self != .none;
     }
 
+    /// Returns the raw u32 index. Asserts `self != .none`.
     pub fn index(self: SymbolIndex) u32 {
         std.debug.assert(self != .none);
         return @intFromEnum(self);
@@ -28,11 +31,15 @@ pub const SymbolIndex = enum(u32) {
 };
 
 pub const Symbol = struct {
+    /// The name as it appears in source. Never empty for valid symbols.
     original_name: []const u8,
     kind: Kind,
     flags: Flags,
     nested_scope_slot: ?u32 = null,
+    /// Number of references found during the visit pass. Only symbols with
+    /// `use_count > 0` are candidates for renaming.
     use_count: u32 = 0,
+    /// Byte offset in source where this symbol is declared.
     loc: u32 = 0,
 
     pub const Kind = enum(u4) {
@@ -91,7 +98,9 @@ pub const Module = struct {
     source: [:0]const u8,
     directives: std.ArrayListUnmanaged(Directive),
     declarations: std.ArrayListUnmanaged(Decl),
+    /// Global symbol table. `SymbolIndex` values are indices into this list.
     symbols: std.ArrayListUnmanaged(Symbol),
+    /// Root scope. All nested scopes are reachable via `scope.children`.
     scope: *Scope,
 
     pub fn init(scope: *Scope, source: [:0]const u8) Module {
@@ -664,6 +673,16 @@ pub const pure_builtins = std.StaticStringMap(void).initComptime(.{
     .{ "dpdy", {} },         .{ "dpdyCoarse", {} },   .{ "dpdyFine", {} },
     .{ "fwidth", {} },       .{ "fwidthCoarse", {} }, .{ "fwidthFine", {} },
 });
+
+// =========================================================================
+// Comptime assertions
+// =========================================================================
+
+comptime {
+    std.debug.assert(@sizeOf(Symbol.Flags) == 2);
+    std.debug.assert(@sizeOf(ExprFlags) == 1);
+    std.debug.assert(@sizeOf(SymbolIndex) == 4);
+}
 
 // =========================================================================
 // Tests

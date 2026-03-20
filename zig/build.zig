@@ -1,4 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+comptime {
+    if (builtin.zig_version.major != 0 or builtin.zig_version.minor < 16) {
+        @compileError("miniray requires Zig 0.16.x or newer");
+    }
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

@@ -131,7 +131,7 @@ export fn miniray_minify_json(
 
     json_buf.append(wasm_allocator, '}') catch {};
 
-    return packJsonResultFromBuf(json_buf.items);
+    return packJsonResult(json_buf.items);
 }
 
 /// Validate WGSL source code.
@@ -143,8 +143,7 @@ export fn miniray_validate(source_ptr: [*]const u8, source_len: u32) ?[*]u8 {
     defer wasm_allocator.free(source.ptr[0 .. source.len + 1]);
 
     // Tokenize + parse
-    var tokens = Lexer.tokenize(wasm_allocator, source) catch return null;
-    _ = &tokens;
+    const tokens = Lexer.tokenize(wasm_allocator, source) catch return null;
     var parser = Parser.init(wasm_allocator, source, tokens);
     const module = parser.parse() catch {
         // Build diagnostics JSON from parse errors
@@ -237,8 +236,7 @@ export fn miniray_reflect(source_ptr: [*]const u8, source_len: u32) ?[*]u8 {
     defer wasm_allocator.free(source.ptr[0 .. source.len + 1]);
 
     // Tokenize + parse
-    var tokens = Lexer.tokenize(wasm_allocator, source) catch return null;
-    _ = &tokens;
+    const tokens = Lexer.tokenize(wasm_allocator, source) catch return null;
     var parser = Parser.init(wasm_allocator, source, tokens);
     const module = parser.parse() catch {
         // Return empty result with error
@@ -265,6 +263,65 @@ export fn miniray_reflect(source_ptr: [*]const u8, source_len: u32) ?[*]u8 {
     return out_buf.ptr;
 }
 
+/// Minify and reflect in a single pass with JSON options and JSON result.
+/// Input: source pointer+length, JSON options pointer+length.
+/// Output: pointer to [u32 json_len][u8... json] where JSON is
+///         {"minify":{...},"reflect":{...}}
+///         Returns null on allocation failure.
+export fn miniray_minify_and_reflect_json(
+    source_ptr: [*]const u8,
+    source_len: u32,
+    opts_ptr: [*]const u8,
+    opts_len: u32,
+) ?[*]u8 {
+    const source = makeSentinelSource(source_ptr, source_len) orelse return null;
+    defer wasm_allocator.free(source.ptr[0 .. source.len + 1]);
+
+    const opts_slice = opts_ptr[0..opts_len];
+    const config = Config.parseJson(wasm_allocator, opts_slice) catch Config{};
+    var options = config.toOptions();
+
+    if (config.source_map) |sm| {
+        options.generate_source_map = sm;
+    }
+    if (config.source_map_sources) |sms| {
+        options.source_map_options.include_source = sms;
+    }
+
+    const result = Minifier.minifyAndReflect(wasm_allocator, source, options) catch {
+        return packJsonResult("{\"minify\":{\"code\":\"\",\"errors\":[{\"message\":\"minification failed\"}],\"originalSize\":0,\"minifiedSize\":0},\"reflect\":{\"bindings\":[],\"structs\":{},\"entryPoints\":[]}}");
+    };
+
+    var json_buf: std.ArrayListUnmanaged(u8) = .empty;
+
+    // Minify part
+    json_buf.appendSlice(wasm_allocator, "{\"minify\":{\"code\":\"") catch {};
+    appendJsonEscaped(&json_buf, result.minify.code);
+    json_buf.appendSlice(wasm_allocator, "\",\"errors\":[") catch {};
+    for (result.minify.errors, 0..) |err, i| {
+        if (i > 0) json_buf.append(wasm_allocator, ',') catch {};
+        json_buf.appendSlice(wasm_allocator, "{\"message\":\"") catch {};
+        appendJsonEscaped(&json_buf, err.message);
+        json_buf.appendSlice(wasm_allocator, "\"}") catch {};
+    }
+    json_buf.appendSlice(wasm_allocator, "],\"originalSize\":") catch {};
+    appendInt(&json_buf, result.minify.original_size);
+    json_buf.appendSlice(wasm_allocator, ",\"minifiedSize\":") catch {};
+    appendInt(&json_buf, result.minify.minified_size);
+    if (result.minify.source_map) |sm| {
+        json_buf.appendSlice(wasm_allocator, ",\"sourceMap\":") catch {};
+        sm.toJson(&json_buf, wasm_allocator);
+    }
+    json_buf.appendSlice(wasm_allocator, "},\"reflect\":") catch {};
+
+    // Reflect part
+    result.reflect.toJson(&json_buf, wasm_allocator);
+
+    json_buf.append(wasm_allocator, '}') catch {};
+
+    return packJsonResult(json_buf.items);
+}
+
 /// Return the version string.
 export fn miniray_version() [*]const u8 {
     return "0.4.0";
@@ -285,7 +342,7 @@ fn packReflectError(errors: []const Parser.ParseError) ?[*]u8 {
         json_buf.append(wasm_allocator, '"') catch {};
     }
     json_buf.appendSlice(wasm_allocator, "]}") catch {};
-    return packJsonResultFromBuf(json_buf.items);
+    return packJsonResult(json_buf.items);
 }
 
 // =========================================================================
@@ -321,13 +378,6 @@ fn appendInt(buf: *std.ArrayListUnmanaged(u8), value: anytype) void {
 }
 
 fn packJsonResult(json: []const u8) ?[*]u8 {
-    const out_buf = wasm_allocator.alloc(u8, 4 + json.len) catch return null;
-    std.mem.writeInt(u32, out_buf[0..4], @intCast(json.len), .little);
-    @memcpy(out_buf[4..][0..json.len], json);
-    return out_buf.ptr;
-}
-
-fn packJsonResultFromBuf(json: []const u8) ?[*]u8 {
     const out_buf = wasm_allocator.alloc(u8, 4 + json.len) catch return null;
     std.mem.writeInt(u32, out_buf[0..4], @intCast(json.len), .little);
     @memcpy(out_buf[4..][0..json.len], json);

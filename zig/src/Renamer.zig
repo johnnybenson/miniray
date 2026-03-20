@@ -212,6 +212,8 @@ pub fn numberToMinifiedName(buf: []u8, n_in: u32) []const u8 {
 // Reserved names
 // =========================================================================
 
+/// Build the set of names that must not be used for renamed symbols
+/// (keywords, reserved words, builtin types, etc.).
 pub fn computeReservedNames(allocator: std.mem.Allocator) std.StringHashMapUnmanaged(void) {
     var reserved = std.StringHashMapUnmanaged(void){};
 

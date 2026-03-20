@@ -73,6 +73,84 @@ test "MinifyAndReflect" {
 }
 
 // =========================================================================
+// TestMinifyAndReflectCombined — uses minifyAndReflect for shared renamer
+// =========================================================================
+
+test "MinifyAndReflectCombined" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 =
+        \\struct Uniforms {
+        \\    time: f32,
+        \\    resolution: vec2f,
+        \\}
+        \\
+        \\@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+        \\@group(0) @binding(1) var texSampler: sampler;
+        \\
+        \\@fragment
+        \\fn main(@location(0) uv: vec2f) -> @location(0) vec4f {
+        \\    let t = uniforms.time;
+        \\    return vec4f(t, 0.0, 0.0, 1.0);
+        \\}
+    ;
+
+    const result = try miniray.minifyAndReflect(allocator, source, .{
+        .minify_whitespace = true,
+        .minify_identifiers = true,
+        .minify_syntax = false,
+        .tree_shaking = false,
+    });
+
+    // Minification should succeed
+    try std.testing.expectEqual(@as(usize, 0), result.minify.errors.len);
+    try std.testing.expect(result.minify.code.len > 0);
+    try std.testing.expect(result.minify.minified_size < result.minify.original_size);
+
+    // Reflection should have bindings with mapped names
+    try std.testing.expect(result.reflect.bindings.items.len >= 2);
+    try std.testing.expect(result.reflect.entry_points.items.len > 0);
+
+    // The uniforms binding should have original name "uniforms" but a mapped name
+    // that differs (since identifiers are minified). The mapped name should appear
+    // in the minified code.
+    for (result.reflect.bindings.items) |b| {
+        if (b.group == 0 and b.binding == 0) {
+            try std.testing.expectEqualStrings("uniforms", b.name);
+            // name_mapped should appear in the minified output
+            try std.testing.expect(std.mem.indexOf(u8, result.minify.code, b.name_mapped) != null);
+        }
+    }
+
+    // Entry point "main" keeps its name (entry points are not renamed)
+    var found_main = false;
+    for (result.reflect.entry_points.items) |ep| {
+        if (std.mem.eql(u8, ep.name, "main")) {
+            found_main = true;
+        }
+    }
+    try std.testing.expect(found_main);
+}
+
+// =========================================================================
+// TestMinifyAndReflectCombinedParseError
+// =========================================================================
+
+test "MinifyAndReflectCombinedParseError" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 = "fn invalid( { }";
+
+    const result = try miniray.minifyAndReflect(allocator, source, miniray.Minifier.defaultOptions());
+    try std.testing.expect(result.minify.errors.len > 0);
+    try std.testing.expect(result.reflect.errors.items.len > 0);
+}
+
+// =========================================================================
 // TestMinifyAndReflectParseError
 // =========================================================================
 

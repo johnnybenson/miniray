@@ -1,75 +1,93 @@
 const std = @import("std");
 const miniray = @import("miniray");
 
+const CliArgs = struct {
+    input_path: ?[]const u8 = null,
+    output_path: ?[]const u8 = null,
+    options: miniray.Minifier.Options = miniray.Minifier.defaultOptions(),
+    source_map: bool = false,
+    source_map_inline: bool = false,
+    subcommand: enum { minify, validate, reflect } = .minify,
+    show_help: bool = false,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const io = init.io;
-    const Dir = std.Io.Dir;
-    const File = std.Io.File;
 
-    var input_path: ?[]const u8 = null;
-    var output_path: ?[]const u8 = null;
+    var args = parseArgs(allocator, init.minimal.args, io) orelse return;
+
+    // Read input
+    const source = try readSource(allocator, io, args.input_path);
+
+    switch (args.subcommand) {
+        .validate => try runValidate(allocator, io, source),
+        .reflect => try runReflect(allocator, io, source),
+        .minify => try runMinify(allocator, io, source, args.options, args.output_path, args.source_map, args.source_map_inline),
+    }
+}
+
+fn parseArgs(allocator: std.mem.Allocator, raw_args: anytype, io: std.Io) ?CliArgs {
+    const File = std.Io.File;
+    const Dir = std.Io.Dir;
+    var args = CliArgs{};
     var config_path: ?[]const u8 = null;
-    var options = miniray.Minifier.defaultOptions();
     var cli_no_mangle = false;
     var cli_no_tree_shaking = false;
-    var source_map = false;
-    var source_map_inline = false;
     var source_map_sources = false;
     var keep_names_raw: ?[]const u8 = null;
-    var subcommand: enum { minify, validate, reflect } = .minify;
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = std.process.Args.Iterator.init(raw_args);
     _ = args_iter.skip(); // skip program name
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "validate")) {
-            subcommand = .validate;
+            args.subcommand = .validate;
         } else if (std.mem.eql(u8, arg, "reflect")) {
-            subcommand = .reflect;
+            args.subcommand = .reflect;
         } else if (std.mem.eql(u8, arg, "-o")) {
-            output_path = args_iter.next();
+            args.output_path = args_iter.next();
         } else if (std.mem.eql(u8, arg, "--config")) {
             config_path = args_iter.next();
         } else if (std.mem.eql(u8, arg, "--no-mangle")) {
             cli_no_mangle = true;
         } else if (std.mem.eql(u8, arg, "--mangle-external-bindings")) {
-            options.mangle_external_bindings = true;
+            args.options.mangle_external_bindings = true;
         } else if (std.mem.eql(u8, arg, "--no-tree-shaking")) {
             cli_no_tree_shaking = true;
         } else if (std.mem.eql(u8, arg, "--preserve-uniform-struct-types")) {
-            options.preserve_uniform_struct_types = true;
+            args.options.preserve_uniform_struct_types = true;
         } else if (std.mem.eql(u8, arg, "--source-map")) {
-            source_map = true;
+            args.source_map = true;
         } else if (std.mem.eql(u8, arg, "--source-map-inline")) {
-            source_map_inline = true;
+            args.source_map_inline = true;
         } else if (std.mem.eql(u8, arg, "--source-map-sources")) {
             source_map_sources = true;
         } else if (std.mem.eql(u8, arg, "--keep-names")) {
             keep_names_raw = args_iter.next();
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try File.stdout().writeStreamingAll(io, usage_text);
-            return;
+            File.stdout().writeStreamingAll(io, usage_text) catch {};
+            return null;
         } else if (arg.len > 0 and arg[0] != '-') {
-            input_path = arg;
+            args.input_path = arg;
         }
     }
 
     // Load config file if specified
     if (config_path) |path| {
         const content = Dir.cwd().readFileAlloc(io, path, allocator, .unlimited) catch {
-            try File.stderr().writeStreamingAll(io, "error: could not read config file\n");
-            return;
+            File.stderr().writeStreamingAll(io, "error: could not read config file\n") catch {};
+            return null;
         };
         const config = miniray.Config.parseJson(allocator, content) catch {
-            try File.stderr().writeStreamingAll(io, "error: invalid config JSON\n");
-            return;
+            File.stderr().writeStreamingAll(io, "error: invalid config JSON\n") catch {};
+            return null;
         };
-        options = config.toOptions();
+        args.options = config.toOptions();
     }
 
     // CLI overrides
-    if (cli_no_mangle) options.minify_identifiers = false;
-    if (cli_no_tree_shaking) options.tree_shaking = false;
+    if (cli_no_mangle) args.options.minify_identifiers = false;
+    if (cli_no_tree_shaking) args.options.tree_shaking = false;
 
     // Parse --keep-names (comma-separated)
     if (keep_names_raw) |raw| {
@@ -81,30 +99,23 @@ pub fn main(init: std.process.Init) !void {
                 names.append(allocator, trimmed) catch {};
             }
         }
-        options.keep_names = names.items;
+        args.options.keep_names = names.items;
     }
 
     // Configure source map options
-    const generate_source_map = source_map or source_map_inline;
+    const generate_source_map = args.source_map or args.source_map_inline;
     if (generate_source_map) {
-        options.generate_source_map = true;
-        options.source_map_options.include_source = source_map_sources;
-        if (input_path) |path| {
-            options.source_map_options.source_name = std.fs.path.basename(path);
+        args.options.generate_source_map = true;
+        args.options.source_map_options.include_source = source_map_sources;
+        if (args.input_path) |path| {
+            args.options.source_map_options.source_name = std.fs.path.basename(path);
         }
-        if (output_path) |path| {
-            options.source_map_options.file = std.fs.path.basename(path);
+        if (args.output_path) |path| {
+            args.options.source_map_options.file = std.fs.path.basename(path);
         }
     }
 
-    // Read input
-    const source = try readSource(allocator, io, input_path);
-
-    switch (subcommand) {
-        .validate => try runValidate(allocator, io, source),
-        .reflect => try runReflect(allocator, io, source),
-        .minify => try runMinify(allocator, io, source, options, output_path, source_map, source_map_inline),
-    }
+    return args;
 }
 
 fn readSource(allocator: std.mem.Allocator, io: std.Io, input_path: ?[]const u8) ![:0]const u8 {
@@ -196,8 +207,7 @@ fn runValidate(allocator: std.mem.Allocator, io: std.Io, source: [:0]const u8) !
     const File = std.Io.File;
 
     // Tokenize + parse
-    var tokens = try miniray.Lexer.tokenize(allocator, source);
-    _ = &tokens;
+    const tokens = try miniray.Lexer.tokenize(allocator, source);
     var parser = miniray.Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         try File.stderr().writeStreamingAll(io, "error: parse failed\n");
@@ -230,8 +240,7 @@ fn runReflect(allocator: std.mem.Allocator, io: std.Io, source: [:0]const u8) !v
     const File = std.Io.File;
 
     // Tokenize + parse
-    var tokens = try miniray.Lexer.tokenize(allocator, source);
-    _ = &tokens;
+    const tokens = try miniray.Lexer.tokenize(allocator, source);
     var parser = miniray.Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         try File.stderr().writeStreamingAll(io, "error: parse failed\n");
