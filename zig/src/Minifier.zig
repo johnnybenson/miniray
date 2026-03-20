@@ -77,7 +77,7 @@ pub fn minify(allocator: std.mem.Allocator, source: [:0]const u8, options: Optio
     defer tokens.deinit(allocator);
 
     // 2. Parse
-    var parser = Parser.init(allocator, source, tokens);
+    var parser = try Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         result.code = source;
         result.minified_size = source.len;
@@ -165,7 +165,7 @@ pub fn minifyAndReflect(allocator: std.mem.Allocator, source: [:0]const u8, opti
     defer tokens.deinit(allocator);
 
     // 2. Parse
-    var parser = Parser.init(allocator, source, tokens);
+    var parser = try Parser.init(allocator, source, tokens);
     const module = parser.parse() catch {
         result.minify.code = source;
         result.minify.minified_size = source.len;

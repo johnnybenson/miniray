@@ -143,6 +143,13 @@ pub fn build(b: *std.Build) void {
     });
     const run_reflect_tests = b.addRunArtifact(reflect_tests);
 
+    // Semantic test data module (lives at project root to access testdata/)
+    const semantic_data_mod = b.addModule("semantic_data", .{
+        .root_source_file = b.path("../testdata_semantic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Compute.toys tests (tests/)
     const compute_toys_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -151,17 +158,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "miniray", .module = miniray_mod },
+                .{ .name = "semantic_data", .module = semantic_data_mod },
             },
         }),
     });
     const run_compute_toys_tests = b.addRunArtifact(compute_toys_tests);
-
-    // Semantic test data module (lives at project root to access testdata/)
-    const semantic_data_mod = b.addModule("semantic_data", .{
-        .root_source_file = b.path("../testdata_semantic.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
 
     // Semantic preservation tests (tests/)
     const semantic_tests = b.addTest(.{
@@ -177,6 +178,36 @@ pub fn build(b: *std.Build) void {
     });
     const run_semantic_tests = b.addRunArtifact(semantic_tests);
 
+    // Source map tests (tests/)
+    const sourcemap_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/sourcemap_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "miniray", .module = miniray_mod },
+            },
+        }),
+    });
+    const run_sourcemap_tests = b.addRunArtifact(sourcemap_tests);
+
+    // Tint tests (tests/) — bulk semantic preservation test of ~1,445 real Tint shaders.
+    // testdata/tint/ is optional: if absent the test prints a skip message and passes.
+    const tint_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/tint_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "miniray", .module = miniray_mod },
+            },
+        }),
+    });
+    const run_tint_tests = b.addRunArtifact(tint_tests);
+
+    const tint_step = b.step("tint-test", "Run Tint semantic preservation tests");
+    tint_step.dependOn(&run_tint_tests.step);
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_snapshot_tests.step);
@@ -186,4 +217,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_compute_toys_tests.step);
     test_step.dependOn(&run_reflect_tests.step);
     test_step.dependOn(&run_semantic_tests.step);
+    test_step.dependOn(&run_sourcemap_tests.step);
+    test_step.dependOn(&run_tint_tests.step);
 }
